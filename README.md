@@ -1,0 +1,169 @@
+# Awareness Local
+
+**Give your AI agent persistent memory. One command. No account. Works offline.**
+
+Awareness Local is a local-first memory system for AI coding agents. It runs a lightweight daemon on your machine that stores memories as Markdown files, searches with hybrid FTS5 + embedding, and connects to any IDE via the MCP protocol.
+
+```bash
+npx @awareness-sdk/setup
+```
+
+That's it. Your AI agent now remembers everything across sessions.
+
+---
+
+## What It Does
+
+**Before:** Every session starts from scratch. You re-explain the codebase, re-justify decisions, watch the agent redo work.
+
+**After:** Your agent says *"I remember you were migrating from MySQL to PostgreSQL. Last session you completed the schema changes and had 2 TODOs remaining..."*
+
+```
+Session 1                          Session 2
+┌─────────────────────────┐       ┌─────────────────────────┐
+│ Agent: "What database?" │       │ Agent: "I remember we   │
+│ You: "PostgreSQL..."    │       │ chose PostgreSQL for     │
+│ Agent: "What framework?"│  →    │ JSON support. You had    │
+│ You: "FastAPI..."       │       │ 2 TODOs left. Let me     │
+│ (repeat every session)  │       │ continue from there."    │
+└─────────────────────────┘       └─────────────────────────┘
+```
+
+---
+
+## Supported IDEs (13+)
+
+| IDE | Auto-detected | Plugin |
+|-----|:---:|:---:|
+| **Claude Code** | ✅ | [`awareness-memory`](https://github.com/edwin-hao-ai/Awareness-SDK/tree/main/claudecode) |
+| **Cursor** | ✅ | via MCP |
+| **Windsurf** | ✅ | via MCP |
+| **OpenClaw** | ✅ | [`@awareness-sdk/openclaw-memory`](https://www.npmjs.com/package/@awareness-sdk/openclaw-memory) |
+| **Cline** | ✅ | via MCP |
+| **GitHub Copilot** | ✅ | via MCP |
+| **Codex CLI** | ✅ | via MCP |
+| **Kiro** | ✅ | via MCP |
+| **Trae** | ✅ | via MCP |
+| **Zed** | ✅ | via MCP |
+| **JetBrains (Junie)** | ✅ | via MCP |
+| **Augment** | ✅ | via MCP |
+| **AntiGravity (Gemini)** | ✅ | via MCP |
+
+---
+
+## How It Works
+
+```
+Your IDE / AI Agent
+    │
+    │  MCP Protocol (localhost:37800)
+    ▼
+┌────────────────────────────────────┐
+│  Awareness Local Daemon            │
+│                                    │
+│  Markdown files    → Human-readable, git-friendly
+│  SQLite FTS5       → Fast keyword search
+│  Local embedding   → Semantic search (optional, 23-118MB)
+│  Knowledge cards   → Auto-extracted decisions, solutions, risks
+│  Web Dashboard     → http://localhost:37800/
+│                                    │
+│  Cloud sync (optional)             │
+│  → One-click device-auth           │
+│  → Bidirectional sync              │
+│  → Semantic vector search          │
+│  → Team collaboration              │
+└────────────────────────────────────┘
+```
+
+### Your Data
+
+All memories stored as **Markdown files** in `.awareness/` — human-readable, editable, git-friendly:
+
+```
+.awareness/
+├── memories/
+│   ├── 2026-03-22_decided-to-use-postgresql.md
+│   ├── 2026-03-22_fixed-auth-bug.md
+│   └── ...
+├── knowledge/
+│   ├── decisions/postgresql-over-mysql.md
+│   └── solutions/auth-token-refresh.md
+├── tasks/
+│   └── open/implement-rate-limiting.md
+└── index.db  (search index, auto-rebuilt)
+```
+
+---
+
+## Features
+
+### MCP Tools (available in your IDE)
+
+| Tool | What it does |
+|------|-------------|
+| `awareness_init` | Load session context — recent knowledge, tasks, rules |
+| `awareness_recall` | Search memories — progressive disclosure (summary → full) |
+| `awareness_record` | Save decisions, code changes, insights — with knowledge extraction |
+| `awareness_lookup` | Fast lookup — tasks, knowledge cards, session history, risks |
+| `awareness_get_agent_prompt` | Get agent-specific prompts for multi-agent setups |
+
+### Progressive Disclosure (Smart Token Usage)
+
+Instead of dumping everything into context, Awareness uses a two-phase recall:
+
+```
+Phase 1: awareness_recall(query, detail="summary")
+  → Lightweight index (~80 tokens each): title + summary + score
+  → Agent reviews and picks what's relevant
+
+Phase 2: awareness_recall(detail="full", ids=[...])
+  → Complete content for selected items only
+  → No truncation, no wasted tokens
+```
+
+### Web Dashboard
+
+Visit `http://localhost:37800/` to browse memories, knowledge cards, tasks, and manage cloud sync.
+
+### Cloud Sync (Optional)
+
+Connect to [Awareness Cloud](https://awareness.market) for:
+- Semantic vector search (100+ languages)
+- Cross-device real-time sync
+- Team collaboration
+- Memory marketplace
+
+```bash
+npx @awareness-sdk/setup --cloud
+# Or click "Connect to Cloud" in the dashboard
+```
+
+---
+
+## SDK & Plugin Ecosystem
+
+Awareness Local is part of the Awareness ecosystem:
+
+| Package | For | Install |
+|---------|-----|---------|
+| **[Awareness Local](https://github.com/edwin-hao-ai/Awareness-Local)** | Local daemon + MCP server | `npx @awareness-sdk/setup` |
+| **[Python SDK](https://pypi.org/project/awareness-memory-cloud/)** | `wrap_openai()` / `wrap_anthropic()` interceptors | `pip install awareness-memory-cloud` |
+| **[TypeScript SDK](https://www.npmjs.com/package/@awareness-sdk/memory-cloud)** | `wrapOpenAI()` / `wrapAnthropic()` interceptors | `npm i @awareness-sdk/memory-cloud` |
+| **[OpenClaw Plugin](https://www.npmjs.com/package/@awareness-sdk/openclaw-memory)** | Auto-recall + auto-capture | `openclaw plugins install @awareness-sdk/openclaw-memory` |
+| **[Claude Code Plugin](https://github.com/edwin-hao-ai/Awareness-SDK/tree/main/claudecode)** | Skills + hooks | `/plugin install awareness-memory` |
+| **[Setup CLI](https://www.npmjs.com/package/@awareness-sdk/setup)** | One-command setup for 13+ IDEs | `npx @awareness-sdk/setup` |
+
+Full SDK docs: [awareness.market/docs](https://awareness.market/docs)
+
+---
+
+## Requirements
+
+- Node.js 18+
+- Any MCP-compatible IDE
+
+No Python, no Docker, no cloud account needed.
+
+## License
+
+Apache 2.0
