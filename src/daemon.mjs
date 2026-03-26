@@ -1531,6 +1531,11 @@ export class AwarenessLocalDaemon {
 
   /** Write a single memory, index it, and trigger knowledge extraction. */
   async _remember(params) {
+    // Skip session_checkpoint — these are low-value truncated response snippets
+    // that pollute recall results. Meaningful content is saved via record-rule.
+    if (params.event_type === 'session_checkpoint') {
+      return { status: 'skipped', reason: 'session_checkpoint filtered' };
+    }
     if (!params.content) {
       return { error: 'content is required for remember action' };
     }
