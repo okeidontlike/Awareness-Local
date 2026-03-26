@@ -663,7 +663,14 @@ export class AwarenessLocalDaemon {
       case 'awareness_init': {
         const session = this._createSession(args.source);
         const stats = this.indexer.getStats();
-        const recentCards = this.indexer.getRecentKnowledge(args.max_cards ?? 5);
+        // If a query/prompt is provided, search for relevant cards instead of recent ones
+        const maxCards = args.max_cards ?? 5;
+        let recentCards;
+        if (args.query) {
+          recentCards = await this._searchRelevantCards(args.query, maxCards);
+        } else {
+          recentCards = this.indexer.getRecentKnowledge(maxCards);
+        }
         const openTasks = this.indexer.getOpenTasks(args.max_tasks ?? 0);
         const rawSessions = this.indexer.getRecentSessions(args.days ?? 7);
         // De-noise: only sessions with content; fallback to 3 most recent
@@ -1453,6 +1460,111 @@ export class AwarenessLocalDaemon {
   // Engine methods (called by MCP tools)
   // -----------------------------------------------------------------------
 
+  /**
+   * Search for knowledge cards relevant to a user query.
+   * Uses FTS5 trigram (with CJK n-gram splitting) + embedding dual-channel.
+   *
+   * @param {string} query - User's prompt text
+   * @param {number} limit - Max cards to return
+   * @returns {Promise<object[]>} Knowledge card rows
+   */
+  async _searchRelevantCards(query, limit) {
+    const results = new Map(); // id → { card, score }
+
+    // Channel 1: FTS5 trigram search
+    // Split CJK text into overlapping 3-grams so trigram tokenizer can match
+    const trigrams = this._extractTrigrams(query);
+    if (trigrams.length > 0) {
+      // OR-join trigrams for broad matching
+      const ftsQuery = trigrams.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+      try {
+        const ftsResults = this.indexer.db.prepare(`
+          SELECT k.*, bm25(knowledge_fts) AS rank
+          FROM knowledge_fts
+          JOIN knowledge_cards k ON k.id = knowledge_fts.id
+          WHERE knowledge_fts MATCH ?
+            AND k.status = 'active'
+          ORDER BY rank
+          LIMIT ?
+        `).all(ftsQuery, limit * 2);
+        for (const r of ftsResults) {
+          results.set(r.id, { card: r, score: 1 / (60 + (results.size + 1)) });
+        }
+      } catch {
+        // FTS query syntax error — skip
+      }
+    }
+
+    // Channel 2: Embedding cosine similarity (if available via search engine)
+    if (this._embedder) {
+      try {
+        const available = await this._embedder.isEmbeddingAvailable();
+        if (available) {
+          const queryVec = await this._embedder.embed(query, 'query');
+          const allCards = this.indexer.db
+            .prepare("SELECT * FROM knowledge_cards WHERE status = 'active' ORDER BY created_at DESC LIMIT 50")
+            .all();
+          for (const card of allCards) {
+            const cardText = `${card.title || ''} ${card.summary || ''}`.trim();
+            if (!cardText) continue;
+            try {
+              const cardVec = await this._embedder.embed(cardText, 'passage');
+              const sim = this._embedder.cosineSimilarity(queryVec, cardVec);
+              const existing = results.get(card.id);
+              const ftsScore = existing?.score || 0;
+              // RRF-style fusion: combine FTS rank + embedding similarity
+              results.set(card.id, { card, score: ftsScore + sim });
+            } catch { /* skip individual card errors */ }
+          }
+        }
+      } catch {
+        // Embedder not available — FTS-only
+      }
+    }
+
+    // Sort by combined score descending
+    const sorted = [...results.values()]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(r => r.card);
+
+    // Supplement with recent cards if not enough results
+    if (sorted.length < limit) {
+      const matchedIds = new Set(sorted.map(c => c.id));
+      const recent = this.indexer.getRecentKnowledge(limit)
+        .filter(c => !matchedIds.has(c.id));
+      return [...sorted, ...recent].slice(0, limit);
+    }
+    return sorted;
+  }
+
+  /**
+   * Extract overlapping trigrams from text for FTS5 trigram tokenizer matching.
+   * Handles CJK (no spaces) and Latin (space-separated) text.
+   *
+   * @param {string} text
+   * @returns {string[]} Deduplicated trigrams
+   */
+  _extractTrigrams(text) {
+    if (!text) return [];
+    const trigrams = new Set();
+    // Split on whitespace first for Latin words
+    const parts = text.split(/\s+/).filter(t => t.length >= 2);
+    for (const part of parts) {
+      if (part.length <= 4) {
+        // Short words: use as-is (FTS5 trigram handles prefix matching)
+        trigrams.add(part);
+      } else {
+        // Extract overlapping 3-char windows
+        for (let i = 0; i <= part.length - 3; i++) {
+          trigrams.add(part.substring(i, i + 3));
+        }
+      }
+    }
+    // Cap at 12 trigrams to keep FTS query reasonable
+    return [...trigrams].slice(0, 12);
+  }
+
   /** Create a new session and return session metadata. */
   _createSession(source) {
     return this.indexer.createSession(source || 'local');
@@ -1958,6 +2070,8 @@ ${item.description || item.title || ''}
           } catch {
             // Embedder optional — conflict detection falls back to BM25 only
           }
+          // Store embedder reference for prompt-aware init search
+          if (embedderModule) this._embedder = embedderModule;
           return new KnowledgeExtractor(this.memoryStore, this.indexer, embedderModule);
         }
       }
