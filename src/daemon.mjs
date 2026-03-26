@@ -1471,31 +1471,17 @@ export class AwarenessLocalDaemon {
   async _searchRelevantCards(query, limit) {
     const results = new Map(); // id → { card, score }
 
-    // Channel 1: FTS5 trigram search
-    // Split CJK text into overlapping 3-grams so trigram tokenizer can match
-    const trigrams = this._extractTrigrams(query);
-    if (trigrams.length > 0) {
-      // OR-join trigrams for broad matching
-      const ftsQuery = trigrams.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+    // Channel 1: FTS5 search (sanitiseFtsQuery now handles CJK trigram splitting)
+    if (this.indexer.searchKnowledge) {
       try {
-        const ftsResults = this.indexer.db.prepare(`
-          SELECT k.*, bm25(knowledge_fts) AS rank
-          FROM knowledge_fts
-          JOIN knowledge_cards k ON k.id = knowledge_fts.id
-          WHERE knowledge_fts MATCH ?
-            AND k.status = 'active'
-          ORDER BY rank
-          LIMIT ?
-        `).all(ftsQuery, limit * 2);
+        const ftsResults = this.indexer.searchKnowledge(query, { limit: limit * 2 });
         for (const r of ftsResults) {
           results.set(r.id, { card: r, score: 1 / (60 + (results.size + 1)) });
         }
-      } catch {
-        // FTS query syntax error — skip
-      }
+      } catch { /* FTS error — skip */ }
     }
 
-    // Channel 2: Embedding cosine similarity (if available via search engine)
+    // Channel 2: Embedding cosine similarity (if available)
     if (this._embedder) {
       try {
         const available = await this._embedder.isEmbeddingAvailable();
@@ -1512,14 +1498,11 @@ export class AwarenessLocalDaemon {
               const sim = this._embedder.cosineSimilarity(queryVec, cardVec);
               const existing = results.get(card.id);
               const ftsScore = existing?.score || 0;
-              // RRF-style fusion: combine FTS rank + embedding similarity
               results.set(card.id, { card, score: ftsScore + sim });
             } catch { /* skip individual card errors */ }
           }
         }
-      } catch {
-        // Embedder not available — FTS-only
-      }
+      } catch { /* Embedder not available — FTS-only */ }
     }
 
     // Sort by combined score descending
@@ -1536,33 +1519,6 @@ export class AwarenessLocalDaemon {
       return [...sorted, ...recent].slice(0, limit);
     }
     return sorted;
-  }
-
-  /**
-   * Extract overlapping trigrams from text for FTS5 trigram tokenizer matching.
-   * Handles CJK (no spaces) and Latin (space-separated) text.
-   *
-   * @param {string} text
-   * @returns {string[]} Deduplicated trigrams
-   */
-  _extractTrigrams(text) {
-    if (!text) return [];
-    const trigrams = new Set();
-    // Split on whitespace first for Latin words
-    const parts = text.split(/\s+/).filter(t => t.length >= 2);
-    for (const part of parts) {
-      if (part.length <= 4) {
-        // Short words: use as-is (FTS5 trigram handles prefix matching)
-        trigrams.add(part);
-      } else {
-        // Extract overlapping 3-char windows
-        for (let i = 0; i <= part.length - 3; i++) {
-          trigrams.add(part.substring(i, i + 3));
-        }
-      }
-    }
-    // Cap at 12 trigrams to keep FTS query reasonable
-    return [...trigrams].slice(0, 12);
   }
 
   /** Create a new session and return session metadata. */
