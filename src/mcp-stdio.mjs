@@ -22,6 +22,13 @@ import http from 'node:http';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Force UTF-8 on Windows so Chinese/CJK text in MCP stdio is not corrupted
+if (process.platform === 'win32') {
+  try { process.stdin.setEncoding('utf8'); } catch { /* best-effort */ }
+  try { process.stdout.setEncoding('utf8'); } catch { /* best-effort */ }
+  try { process.stderr.setEncoding('utf8'); } catch { /* best-effort */ }
+}
+
 // ---------------------------------------------------------------------------
 // Logging — always to stderr so stdout stays clean for stdio protocol
 // ---------------------------------------------------------------------------

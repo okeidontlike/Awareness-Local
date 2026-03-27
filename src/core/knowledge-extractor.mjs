@@ -17,6 +17,68 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+// Valid knowledge card categories (matches cloud backend VALID_CATEGORIES)
+const VALID_CATEGORIES = new Set([
+  'problem_solution', 'decision', 'workflow', 'key_point', 'pitfall', 'insight',
+  'personal_preference', 'important_detail', 'plan_intention', 'activity_preference',
+  'health_info', 'career_info', 'custom_misc',
+  // Extended aliases accepted from LLMs
+  'risk', 'skill',
+]);
+
+// Map non-standard LLM-generated categories to standard ones
+const CATEGORY_ALIASES = {
+  'troubleshooting': 'problem_solution',
+  'bug_fix': 'problem_solution',
+  'bugfix': 'problem_solution',
+  'fix': 'problem_solution',
+  'best_practice': 'insight',
+  'best-practice': 'insight',
+  'bestpractice': 'insight',
+  'pattern': 'insight',
+  'tip': 'insight',
+  'lesson': 'insight',
+  'learning': 'insight',
+  'setup': 'workflow',
+  'configuration': 'workflow',
+  'config': 'workflow',
+  'process': 'workflow',
+  'procedure': 'workflow',
+  'guide': 'workflow',
+  'howto': 'workflow',
+  'how_to': 'workflow',
+  'warning': 'pitfall',
+  'limitation': 'pitfall',
+  'gotcha': 'pitfall',
+  'caveat': 'pitfall',
+  'note': 'key_point',
+  'fact': 'key_point',
+  'reference': 'key_point',
+  'preference': 'personal_preference',
+  'goal': 'plan_intention',
+  'plan': 'plan_intention',
+  'task': 'plan_intention',
+  'hobby': 'activity_preference',
+  'interest': 'activity_preference',
+  'job': 'career_info',
+  'role': 'career_info',
+};
+
+/** Normalize a category string to a valid standard category. */
+function normalizeCategory(raw) {
+  if (!raw) return 'key_point';
+  const lower = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (VALID_CATEGORIES.has(lower)) return lower;
+  if (CATEGORY_ALIASES[lower]) return CATEGORY_ALIASES[lower];
+  // Try partial match for compound names like BEST-PRACTICE, TROUBLESHOOTING
+  for (const [alias, target] of Object.entries(CATEGORY_ALIASES)) {
+    if (lower.includes(alias.replace(/_/g, '')) || alias.replace(/_/g, '').includes(lower)) {
+      return target;
+    }
+  }
+  return 'key_point';
+}
+
 // Conflict detection thresholds for SQLite FTS5 trigram tokenizer.
 // bm25() returns negative values — closer to 0 = better match.
 // Trigram range is typically -0.1 to -3.0 (much narrower than PostgreSQL ts_rank).
@@ -133,7 +195,7 @@ export class KnowledgeExtractor {
       for (const kc of insights.knowledge_cards) {
         cards.push({
           id: this._generateId('kc'),
-          category: kc.category || 'key_point',
+          category: normalizeCategory(kc.category),
           title: kc.title || '',
           summary: kc.content || kc.summary || '',
           confidence: kc.confidence ?? 0.85,
