@@ -59,6 +59,9 @@ export function buildInitResult({
   const activeSkills = extractActiveSkills(allActiveCards);
   const { user_preferences, knowledge_cards: otherCards } = splitPreferences(recentCards);
 
+  // Build lightweight perception signals for init (staleness + pitfall guards)
+  const initPerception = _buildInitPerception(indexer, allActiveCards);
+
   const initResult = {
     session_id: session.id,
     mode: 'local',
@@ -76,12 +79,50 @@ export function buildInitResult({
   };
 
   try {
-    initResult.rendered_context = buildContextXml(initResult, [], [], renderContextOptions);
+    initResult.rendered_context = buildContextXml(initResult, [], initPerception, renderContextOptions);
   } catch {
     // Non-fatal — client can still use structured data
   }
 
   return initResult;
+}
+
+/**
+ * Build lightweight perception signals at session init.
+ * Only generates staleness + pitfall-as-guard signals (zero LLM, fast).
+ */
+function _buildInitPerception(indexer, allCards) {
+  const signals = [];
+  const now = Date.now();
+  const STALE_THRESHOLD_MS = 30 * 86400000; // 30 days
+
+  // 1. Staleness: find knowledge cards not updated in 30+ days
+  for (const card of allCards) {
+    const updatedMs = card.updated_at
+      ? new Date(card.updated_at).getTime()
+      : card.created_at ? new Date(card.created_at).getTime() : now;
+    if (now - updatedMs > STALE_THRESHOLD_MS && card.status === 'active') {
+      const daysAgo = Math.floor((now - updatedMs) / 86400000);
+      signals.push({
+        type: 'staleness',
+        message: `Knowledge card "${card.title}" has not been updated in ${daysAgo} days — may be outdated.`,
+      });
+      if (signals.length >= 2) break; // Cap at 2 staleness signals
+    }
+  }
+
+  // 2. Pitfall cards as guard signals
+  const pitfalls = allCards
+    .filter((c) => (c.category === 'pitfall' || c.category === 'risk') && c.status === 'active')
+    .slice(0, 3);
+  for (const card of pitfalls) {
+    signals.push({
+      type: 'guard',
+      message: `⚠️ Known pitfall: ${card.title} — ${(card.summary || '').slice(0, 150)}`,
+    });
+  }
+
+  return signals;
 }
 
 export async function buildRecallResult({ search, args, mode = 'local' }) {

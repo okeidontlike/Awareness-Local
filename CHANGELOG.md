@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.5.4] - 2026-04-05
+
+### Added
+- **Init perception injection**: `_buildInitPerception()` in mcp-handlers generates staleness + pitfall guard signals at session start (was empty array).
+- **Keyword-context snippets**: search results show a window around the first matching term instead of always truncating from start.
+- **Metadata hydration**: embedding-only search results now get title/type/tags/source from DB lookup.
+- **Auto-title generation**: untitled results get a preview title from first content sentence.
+- **Recall eval benchmark**: `recall-eval.mjs` with 20-query dataset, Recall@5=80%.
+
+### Changed
+- **RRF normalization**: scores normalized to 0-1 range with type-specific boost multipliers (knowledge_card=1.5x, decision=1.3x, turn_brief=0.4x).
+- **CJK trigram threshold**: lowered from >4 to >=3 chars; short CJK terms (2-4 chars) also kept as-is for exact match.
+- **Pattern detection**: tag co-occurrence (3+ in 7 days) replaces simple category count.
+- **Staleness threshold**: unified to 30 days using COALESCE(updated_at, created_at).
+- **Recall summary format**: now shows score%, days ago, ~tokens per result.
+- **Perception messages**: English (was hardcoded Chinese).
+
+### Fixed
+- **session_checkpoint noise**: filtered from recall results by default (DEFAULT_TYPE_EXCLUDE).
+- **Guard detector test**: mock now includes recentActiveCards for pattern signal generation.
+
+## [0.5.2] - 2026-04-03
+
+### Changed
+- **Freshness from source timestamps**: `memory_profile_service.py` now derives profile freshness from the newest source card/risk timestamp instead of profile rebuild time, so stale knowledge stays marked stale after regeneration.
+- **Concept-level recall anchors**: `query-planner.mjs` now expands paraphrase anchors by concept groups and intent-level anchors instead of tighter benchmark-phrase coupling, reducing overfit while keeping robust recall at full hit rate on the current fixture set.
+- **Profile-gated repo guards**: repo-specific deployment guards now activate only for the Awareness repository profile; generic SDK usage no longer inherits Awareness-only docker/prisma deployment warnings by default.
+
+### Fixed
+- **Summary/object-view drift**: memory profile summaries now prefer rendered `Me / Goal / Context / Pattern` sections and avoid repeating lower-value legacy sections when object-view data is available.
+- **Guard benchmark isolation**: perception benchmark and daemon perception now pass an explicit guard profile so repo-specific guard rules are tested and applied only when intended.
+
+## [0.5.1] - 2026-04-03
+
+### Added
+- **Robust multilingual recall benchmark**: Added `tests/memory-benchmark/datasets/universal_robust.jsonl` plus `benchmark:universal:robust` to measure paraphrase/noisy-query recall on the universal fixture corpus.
+
+### Changed
+- **Chinese paraphrase recall normalization**: `query-planner.mjs` now derives stronger anchor fallback queries for continuation, report-structure, and tool-decision prompts, improving recall on rewritten Chinese queries.
+
+### Fixed
+- **Robust benchmark misses resolved**: The three Chinese paraphrase misses in the robust universal benchmark are now resolved, bringing the builtin robust baseline to full recall/answer hit on the current 20-case dataset.
+
 ## [0.5.0] - 2026-04-01
 
 ### Changed

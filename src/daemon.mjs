@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectNeedsCJK } from './core/lang-detect.mjs';
+import { detectGuardSignals } from './core/guard-detector.mjs';
 import { classifyNoiseEvent } from './core/noise-filter.mjs';
 import { createRequire } from 'node:module';
 import {
@@ -95,6 +96,7 @@ export class AwarenessLocalDaemon {
   constructor(options = {}) {
     this.port = options.port || DEFAULT_PORT;
     this.projectDir = options.projectDir || process.cwd();
+    this.guardProfile = options.guardProfile || detectGuardProfile(this.projectDir);
 
     this.awarenessDir = path.join(this.projectDir, AWARENESS_DIR);
     this.pidFile = path.join(this.awarenessDir, PID_FILENAME);
@@ -638,6 +640,7 @@ export class AwarenessLocalDaemon {
    *
    * Unlike recall (agent asks a question), perception is the system
    * noticing something the agent didn't ask about:
+  * - guard: known high-risk action is about to repeat
    * - resonance: similar past knowledge exists
    * - pattern: recurring category/theme detected (3+)
    * - staleness: related knowledge is old
@@ -651,7 +654,14 @@ export class AwarenessLocalDaemon {
    * @returns {Array<Object>} perception signals (max 5)
    */
   _buildPerception(content, title, memory, insights) {
-    const signals = [];
+    const signals = detectGuardSignals({
+      content,
+      title,
+      tags: memory?.tags,
+      insights,
+    }, {
+      profile: this.guardProfile,
+    });
 
     try {
       // 1. Resonance: find similar existing knowledge cards via FTS5
@@ -676,45 +686,61 @@ export class AwarenessLocalDaemon {
         }
       }
 
-      // 2. Pattern: detect recurring categories (3+ cards of same category)
+      // 2. Pattern: detect recurring themes via tag co-occurrence (not just category count)
       if (insights?.knowledge_cards?.length) {
-        for (const card of insights.knowledge_cards) {
-          const cat = card.category;
-          if (!cat) continue;
-          try {
-            const row = this.indexer.db
-              .prepare(`SELECT COUNT(*) AS cnt FROM knowledge_cards WHERE category = ? AND status = 'active'`)
-              .get(cat);
-            const count = row?.cnt || 0;
-            if (count >= 3) {
-              signals.push({
-                type: 'pattern',
-                category: cat,
-                count: count + 1, // +1 for the one being written now
-                message: `🔄 Pattern: this is the ${this._ordinal(count + 1)} '${cat}' card — recurring theme`,
-              });
+        try {
+          // Collect tags from the last 7 days of active cards
+          const recentCards = this.indexer.db
+            .prepare(
+              `SELECT tags FROM knowledge_cards
+               WHERE status = 'active' AND created_at > datetime('now', '-7 days')`
+            )
+            .all();
+          const tagCounts = new Map();
+          for (const row of recentCards) {
+            let tags = [];
+            try { tags = JSON.parse(row.tags || '[]'); } catch { /* skip */ }
+            for (const t of tags) {
+              if (typeof t === 'string' && t.length >= 2) {
+                const k = t.toLowerCase();
+                tagCounts.set(k, (tagCounts.get(k) || 0) + 1);
+              }
             }
-          } catch { /* ignore */ }
-        }
+          }
+          // Find dominant themes (3+ occurrences in 7 days)
+          const themes = [...tagCounts.entries()]
+            .filter(([, count]) => count >= 3)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 2);
+          for (const [tag, count] of themes) {
+            signals.push({
+              type: 'pattern',
+              tag,
+              count,
+              message: `🔄 Recurring theme in last 7 days: "${tag}" (${count} cards) — consider a systematic approach`,
+            });
+          }
+        } catch { /* ignore */ }
       }
 
-      // 3. Staleness: find related but old knowledge (reuse searchKnowledge for FTS safety)
+      // 3. Staleness: find related but old knowledge (30-day threshold, unified)
       if (title && title.length >= 5) {
         try {
           const relatedResults = this.indexer.searchKnowledge(title, { limit: 3 });
           for (const r of relatedResults) {
-            if (!r.updated_at) continue;
+            const ts = r.updated_at || r.created_at;
+            if (!ts) continue;
             const daysOld = Math.floor(
-              (Date.now() - new Date(r.updated_at).getTime()) / 86400000
+              (Date.now() - new Date(ts).getTime()) / 86400000
             );
-            if (daysOld >= 60) {
+            if (daysOld >= 30) {
               signals.push({
                 type: 'staleness',
                 title: r.title,
                 category: r.category || '',
                 card_id: r.id,
                 days_since_update: daysOld,
-                message: `⏳ Related knowledge "${r.title}" hasn't been updated in ${daysOld} days`,
+                message: `⏳ Related knowledge "${r.title}" hasn't been updated in ${daysOld} days — may be outdated`,
               });
               break; // Only 1 staleness signal
             }
@@ -722,26 +748,59 @@ export class AwarenessLocalDaemon {
         } catch { /* FTS query may fail on special chars */ }
       }
 
-      // 4. Contradiction: surface recently superseded cards (1-day window)
+      // 4. Contradiction: proactive detection via FTS + superseded cards
+      // 4a. Surface recently superseded cards (7-day window)
       try {
-        const oneDayAgo = new Date(Date.now() - 86400000).toISOString();
+        const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
         const superseded = this.indexer.db
           .prepare(
             `SELECT id, title, category, summary FROM knowledge_cards
              WHERE status = 'superseded' AND updated_at > ?
              ORDER BY updated_at DESC LIMIT 2`
           )
-          .all(oneDayAgo);
+          .all(sevenDaysAgo);
         for (const r of superseded) {
           signals.push({
             type: 'contradiction',
             title: r.title,
             summary: r.summary || '',
             card_id: r.id,
-            message: `⚡ This may contradict a prior belief: "${r.title}"`,
+            message: `⚡ Recently superseded belief: "${r.title}" — verify current approach`,
           });
         }
       } catch { /* ignore */ }
+
+      // 4b. Proactive: if new card is decision/problem_solution, check for conflicting active cards
+      if (insights?.knowledge_cards?.length && title) {
+        try {
+          const newCard = insights.knowledge_cards[0];
+          const cat = newCard?.category;
+          if (cat === 'decision' || cat === 'problem_solution') {
+            const similar = this.indexer.searchKnowledge(title, { limit: 3 });
+            for (const existing of similar) {
+              if (existing.category !== cat || !existing.summary) continue;
+              // Simple heuristic: if same category and same topic but different summary content
+              // (Jaccard similarity of words < 0.3), flag as potential contradiction
+              const newWords = new Set((newCard.summary || '').toLowerCase().split(/\s+/));
+              const oldWords = new Set(existing.summary.toLowerCase().split(/\s+/));
+              const intersection = [...newWords].filter((w) => oldWords.has(w)).length;
+              const union = new Set([...newWords, ...oldWords]).size;
+              const jaccard = union > 0 ? intersection / union : 1;
+              if (jaccard < 0.3 && existing.id !== newCard.id) {
+                signals.push({
+                  type: 'contradiction',
+                  title: existing.title,
+                  summary: existing.summary,
+                  card_id: existing.id,
+                  similarity: jaccard,
+                  message: `⚡ New ${cat} may conflict with existing: "${existing.title}" — verify if the old approach is still valid`,
+                });
+                break;
+              }
+            }
+          }
+        } catch { /* ignore */ }
+      }
 
       // 5. Related_decision: find prior decisions with overlapping tags
       if (insights?.knowledge_cards?.length) {
@@ -1125,37 +1184,60 @@ ${item.description || item.title || ''}
           }
         } catch { /* no cache file */ }
 
-        // 2. Derive staleness signals from old knowledge cards
+        // 2. Derive staleness signals from old knowledge cards (30-day threshold, unified)
         try {
           const staleCards = this.indexer.db
             .prepare(
-              "SELECT title, category, created_at FROM knowledge_cards WHERE status = 'active' AND created_at < datetime('now', '-14 days') ORDER BY created_at ASC LIMIT 5"
+              `SELECT title, category, COALESCE(updated_at, created_at) AS last_touch
+               FROM knowledge_cards
+               WHERE status = 'active'
+                 AND COALESCE(updated_at, created_at) < datetime('now', '-30 days')
+               ORDER BY last_touch ASC LIMIT 3`
             )
             .all();
           for (const card of staleCards) {
+            const daysOld = card.last_touch
+              ? Math.floor((Date.now() - new Date(card.last_touch).getTime()) / 86400000)
+              : 30;
             signals.push({
               type: 'staleness',
-              message: `知识卡 "${card.title}" 已超过 14 天未更新`,
+              message: `⏳ Knowledge card "${card.title}" hasn't been updated in ${daysOld} days — may be outdated`,
               card_title: card.title,
               category: card.category,
-              created_at: card.created_at,
+              days_since_update: daysOld,
             });
           }
         } catch { /* db might not have the table */ }
 
-        // 3. Derive pattern signals from repeated categories
+        // 3. Derive pattern signals from tag co-occurrence (not just category count)
         try {
-          const patterns = this.indexer.db
+          const recentCards = this.indexer.db
             .prepare(
-              "SELECT category, COUNT(*) as count FROM knowledge_cards WHERE status = 'active' AND created_at > datetime('now', '-7 days') GROUP BY category HAVING count >= 3 ORDER BY count DESC LIMIT 3"
+              `SELECT tags FROM knowledge_cards
+               WHERE status = 'active' AND created_at > datetime('now', '-7 days')`
             )
             .all();
-          for (const p of patterns) {
+          const tagCounts = new Map();
+          for (const row of recentCards) {
+            let tags = [];
+            try { tags = JSON.parse(row.tags || '[]'); } catch { /* skip */ }
+            for (const t of tags) {
+              if (typeof t === 'string' && t.length >= 2) {
+                const k = t.toLowerCase();
+                tagCounts.set(k, (tagCounts.get(k) || 0) + 1);
+              }
+            }
+          }
+          const themes = [...tagCounts.entries()]
+            .filter(([, count]) => count >= 3)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3);
+          for (const [tag, count] of themes) {
             signals.push({
               type: 'pattern',
-              message: `最近 7 天有 ${p.count} 条 "${p.category}" 类型的记录`,
-              category: p.category,
-              count: p.count,
+              message: `🔄 Recurring theme in last 7 days: "${tag}" (${count} cards) — consider a systematic approach`,
+              tag,
+              count,
             });
           }
         } catch { /* db issue */ }
@@ -1280,6 +1362,16 @@ ${item.description || item.title || ''}
       // ignore
     }
   }
+}
+
+function detectGuardProfile(projectDir) {
+  const explicit = process.env.AWARENESS_LOCAL_GUARD_PROFILE;
+  if (explicit) return explicit;
+  const awarenessMarkers = [
+    path.join(projectDir, 'backend', 'awareness-spec.json'),
+    path.join(projectDir, 'docs', 'prd', 'deployment-guide.md'),
+  ];
+  return awarenessMarkers.every((marker) => fs.existsSync(marker)) ? 'awareness' : 'generic';
 }
 
 export default AwarenessLocalDaemon;

@@ -8,6 +8,7 @@
  *   stop    [--project <dir>]                                 — stop daemon
  *   status  [--project <dir>]                                 — show daemon status + stats
  *   reindex [--project <dir>]                                 — rebuild FTS5 + embedding index
+ *   benchmark --dataset <path> [--project <dir>]              — run local recall benchmark
  *
  * Uses process.argv parsing (no dependencies).
  * For `start` without `--foreground`, spawns self as a detached child process.
@@ -466,6 +467,72 @@ async function cmdMcp(flags) {
   await startStdioMcp({ port, projectDir });
 }
 
+async function cmdBenchmark(flags) {
+  const projectDir = resolveProjectDir(flags);
+  const datasetPath = typeof flags.dataset === 'string' ? path.resolve(flags.dataset) : null;
+  if (!datasetPath || !fs.existsSync(datasetPath)) {
+    console.error('Benchmark requires --dataset <jsonl-path>');
+    process.exit(1);
+  }
+
+  const backendKind = typeof flags.backend === 'string' ? flags.backend : 'builtin';
+  const limit = typeof flags.limit === 'string' ? parseInt(flags.limit, 10) : 5;
+  const reportPath = typeof flags.report === 'string' ? path.resolve(flags.report) : null;
+  const markdownReportPath = typeof flags['markdown-report'] === 'string'
+    ? path.resolve(flags['markdown-report'])
+    : (reportPath ? reportPath.replace(/\.json$/i, '.md') : null);
+
+  const { runBenchmarkSuite } = await import('../src/benchmark/benchmark-runner.mjs');
+  const { createProjectSearchBenchmarkSystems } = await import('../src/benchmark/systems.mjs');
+
+  const systems = await createProjectSearchBenchmarkSystems({
+    projectDir,
+    backendKind,
+    limit: Number.isFinite(limit) && limit > 0 ? limit : 5,
+    reindex: flags.reindex === true,
+    qmd: {
+      dbPath: process.env.AWARENESS_QMD_DB_PATH,
+    },
+  });
+
+  const reports = await runBenchmarkSuite({
+    systems,
+    datasetPath,
+    reportPath,
+    markdownReportPath,
+  });
+
+  if (flags.json === true) {
+    console.log(JSON.stringify(reports, null, 2));
+    return;
+  }
+
+  for (const report of reports) {
+    console.log(`Benchmark system: ${report.system}`);
+    if (report.skipped) {
+      console.log(`  Status:            skipped`);
+      if (report.status?.reason) {
+        console.log(`  Reason:            ${report.status.reason}`);
+      }
+      continue;
+    }
+    console.log(`  Total cases:       ${report.summary.totalCases}`);
+    console.log(`  Recall@3:          ${report.summary.recallAt3.toFixed(3)}`);
+    console.log(`  Recall@5:          ${report.summary.recallAt5.toFixed(3)}`);
+    console.log(`  MRR:               ${report.summary.mrr.toFixed(3)}`);
+    console.log(`  nDCG@5:            ${report.summary.ndcgAt5.toFixed(3)}`);
+    console.log(`  Avg injected toks: ${report.summary.injectedTokensAvg.toFixed(1)}`);
+    console.log(`  Answer hit rate:   ${report.summary.answerHitRate.toFixed(3)}`);
+  }
+
+  if (reportPath) {
+    console.log(`Report written to ${reportPath}`);
+  }
+  if (markdownReportPath) {
+    console.log(`Markdown report written to ${markdownReportPath}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
@@ -483,11 +550,18 @@ Commands:
   status    Show daemon status and stats
   reindex   Rebuild the search index
   mcp       Run as stdio MCP server
+  benchmark Run recall benchmark against a JSONL dataset
 
 Options:
   --project <dir>   Project directory (default: current directory)
   --port <port>     HTTP port (default: 37800)
   --foreground      Run in foreground (don't detach)
+  --dataset <path>  Benchmark JSONL dataset path
+  --backend <kind>  builtin | qmd | hybrid | all (benchmark only)
+  --report <path>   Write benchmark JSON report
+  --markdown-report <path>  Write benchmark Markdown report
+  --reindex         Rebuild the benchmark target index before running
+  --json            Print benchmark report as JSON
   --help            Show this help message
 
 Examples:
@@ -496,6 +570,9 @@ Examples:
   npx @awareness-sdk/local stop
   npx @awareness-sdk/local reindex --project /path/to/project
   npx @awareness-sdk/local mcp --project /path/to/project --port 37800
+  npx @awareness-sdk/local benchmark --project /path/to/project --dataset tests/memory-benchmark/datasets/recall_core.jsonl
+  npx @awareness-sdk/local benchmark --project tests/memory-benchmark/projects/core-recall --dataset tests/memory-benchmark/datasets/recall_core.jsonl --backend builtin --reindex
+  npx @awareness-sdk/local benchmark --project tests/memory-benchmark/projects/universal-core --dataset tests/memory-benchmark/datasets/universal_core.jsonl --backend all --report tests/memory-benchmark/reports/universal_core.json
 `);
 }
 
@@ -526,6 +603,9 @@ async function main() {
       break;
     case 'mcp':
       await cmdMcp(flags);
+      break;
+    case 'benchmark':
+      await cmdBenchmark(flags);
       break;
     default:
       console.error(`Unknown command: ${command}`);
