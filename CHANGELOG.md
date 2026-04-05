@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.6] - 2026-04-05
+
+### Fixed
+- **awareness-spec.json**: Added DO NOT record exclusion list (API keys, credentials, system bootstrap, sender metadata) to the single source of truth spec file.
+- **CLAUDE.md alignment**: Added all 7 personal categories + DO NOT record list to STEP 4.
+
+## [0.5.5] - 2026-04-05
+
+### Fixed
+- **Record-rule prompt quality**: Added few-shot examples with correct/wrong annotations, explicit DO NOT SAVE exclusion list (greetings, metadata, news), organized categories into [Technical] and [Personal] groups.
+- **Full 13-category alignment**: Added missing 5 personal categories (plan_intention, activity_preference, health_info, career_info, custom_misc) and skill category to record-rule prompt.
+- **stripMarkdownPrefix regex**: Fixed `\w+` matching only first word in bold markers like `**Hacker News**`, changed to `[^*]+` for multi-word support.
+
 ## [0.5.4] - 2026-04-05
 
 ### Added

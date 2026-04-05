@@ -14,7 +14,7 @@ const MAX_TERSE_CHAR_COUNT = 12;
 
 function stripMarkdownPrefix(content) {
   return String(content || '')
-    .replace(/^\*\*\w+\*\*\s*\w*\s*\n*/u, '')
+    .replace(/^\*\*[^*]+\*\*\s*\n*/u, '')
     .trim();
 }
 
