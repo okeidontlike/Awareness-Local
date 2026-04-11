@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.5.18] - 2026-04-12
+
+### Added (F-035 — headless device auth proxy)
+- `/api/v1/cloud/auth/start` response now includes `verification_url` (a ready-to-click link with `?code=…` pre-filled) and `is_headless` (true when the daemon is running on SSH / Codespaces / Gitpod / no-DISPLAY Linux / explicit `AWARENESS_HEADLESS=1`). UI layers (AwarenessClaw desktop Memory UI, setup wizards) can use `is_headless` to skip their own `open-browser` attempt and show the code + URL directly.
+- `/api/v1/cloud/auth/poll` accepts a new optional `total_wait_ms` parameter (clamped to `[30s, 900s]`). Previous hard cap was 30 seconds — far too short for cross-device flows where the user has to switch to a phone / second laptop to approve. Default stays at 60s for backward compat.
+
+### Fixed (pre-existing bugs surfaced while wiring F-035)
+- `apiCloudAuthStart` and `apiCloudListMemories` used `daemon.config?.cloud?.api_base` to read the backend URL, but `daemon.config` is never actually assigned — so these handlers silently fell back to the production URL even when users configured a local backend in `.awareness/config.json`. Fixed to use `daemon._loadConfig()?.cloud?.api_base`, matching the rest of the handlers.
+
+## [0.5.17] - 2026-04-11
+
+### Changed
+- `apiListTopics` now includes `tags` field in each topic item, enabling client-side fast-path matching without requiring the MOC card to be in the preloaded card list.
+
+## [0.5.16] - 2026-04-11
+
+### Added
+- **Perception Center — full lifecycle**: new `perception_state` SQLite table with exposure cap (3 exposures → auto-hidden), weight decay (−0.2 per exposure, dormant at <0.3), snooze (7 days), dismiss (permanent), and restore. Stable `signal_id` hashing so signals dedupe across sessions. Surfaces in the wiki dashboard sidebar with a red badge when there are active guards.
+- **LLM auto-resolve**: when `_remember` writes a new memory, `_checkPerceptionResolution` fires a batched LLM call (via cloud chat endpoint) that pre-filters candidates by tag/keyword/source_card overlap, then asks the model whether each active guard/contradiction/pattern/staleness signal has been resolved by the new memory. Resolved signals are marked `auto_resolved` with a `resolution_reason` and excluded from future context.
+- **5 new REST endpoints** on the local daemon: `GET /api/v1/perceptions`, `POST /api/v1/perceptions/:id/{acknowledge,dismiss,restore}`, `POST /api/v1/perceptions/refresh`. All actions are idempotent and user-restorable.
+- **Full Perception Center UI** in the web dashboard (sidebar entry, Overview attention bar, filter tabs, per-signal cards with exposure/weight, Snooze/Dismiss/Restore/Jump-to-card actions).
+- **Lightweight i18n** (EN/ZH): zero-dependency inline `LOCALES` dictionary + `t(key, vars)` translator with variable interpolation. Auto-detects `navigator.language` (zh-* → zh), persists to `localStorage`, hot-reloads the current view on locale change (no page refresh). Language picker in the header (🇬🇧/🇨🇳) and in Settings. 92 `t(...)` call sites cover sidebar, overview, sync, settings, perception, memories.
+- **F-034 `_skill_crystallization_hint` propagation**: `awareness-spec.json` step 5 is now documented in the bundled spec, and the workflow guide shows agents how to synthesize repeated cards into a skill via `awareness_record(insights={skills:[...]})`.
+
+### Changed
+- `awareness-spec.json` synced to the backend SSOT (skill category deprecated, step 5 crystallization added).
+- `_buildPerception` and `_buildInitPerception` now filter through `shouldShowPerception` and call `touchPerceptionState` so every surfaced signal increments exposure and decays weight — same signal can never spam the agent across sessions.
+
+### Tests
+- 20 new node:test cases in `perception-lifecycle.test.mjs` covering CRUD, exposure cap, snooze, auto-resolve, restore, cleanup, and the 5 REST endpoints.
+- Local daemon suite: **100 tests pass** (29 wiki + 20 perception + 49 f031 alignment + 2 other suites).
+
+## [0.5.15] - 2026-04-11
+
+### Fixed
+- **Topic member counts are now always accurate**: `GET /api/v1/topics` no longer trusts the stored `link_count_outgoing` column (which can go stale when member cards are deleted or superseded — `tryAutoMoc` only runs on write, not on delete). The endpoint now recomputes the live member count for every MOC on every read using the exact same tag-LIKE query as `apiGetKnowledgeCard.members`, so the sidebar badge always matches what the topic detail page renders.
+- **Empty MOCs are hidden**: MOC cards whose live member count is 0 are dropped from the topics list so orphaned MOCs (members all deleted) don't clutter the sidebar.
+- Added tests covering stale-count drift and the empty-MOC drop rule.
+
+## [0.5.14] - 2026-04-11
+
+### Fixed
+- **MOC topic cards now return their full member list**: `GET /api/v1/knowledge/:id` on a MOC card (card_type='moc') now returns a `members` array resolved via tag-match (every non-MOC active card that shares at least one tag with the MOC). Previously the endpoint only returned the MOC row itself, so clients had no way to discover topic members and had to fall back to fragile keyword matching. Added a test covering the 3-member case in `wiki-api.test.mjs`. Fixes the "Topic says 15 cards but only 4 shown" bug reported by the AwarenessClaw desktop UI.
+
 ## [0.5.13] - 2026-04-08
 
 ### Fixed

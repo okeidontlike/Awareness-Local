@@ -81,7 +81,7 @@ export function buildInitResult({
   };
 
   const { rules, rule_count } = synthesizeRules(allActiveCards);
-  const activeSkills = extractActiveSkills(allActiveCards);
+  const activeSkills = extractActiveSkills(allActiveCards, indexer);
   const { user_preferences, knowledge_cards: otherCards } = splitPreferences(recentCards);
 
   // Build lightweight perception signals for init (staleness + pitfall guards)
@@ -115,6 +115,7 @@ export function buildInitResult({
 /**
  * Build lightweight perception signals at session init.
  * Only generates staleness + pitfall-as-guard signals (zero LLM, fast).
+ * Applies lifecycle filtering (exposure cap, decay, snooze, dismiss).
  */
 function _buildInitPerception(indexer, allCards) {
   const signals = [];
@@ -130,9 +131,11 @@ function _buildInitPerception(indexer, allCards) {
       const daysAgo = Math.floor((now - updatedMs) / 86400000);
       signals.push({
         type: 'staleness',
+        title: card.title || '',
+        card_id: card.id,
         message: `Knowledge card "${card.title}" has not been updated in ${daysAgo} days — may be outdated.`,
       });
-      if (signals.length >= 2) break; // Cap at 2 staleness signals
+      if (signals.filter(s => s.type === 'staleness').length >= 2) break;
     }
   }
 
@@ -143,11 +146,49 @@ function _buildInitPerception(indexer, allCards) {
   for (const card of pitfalls) {
     signals.push({
       type: 'guard',
+      title: card.title || '',
+      card_id: card.id,
       message: `⚠️ Known pitfall: ${card.title} — ${(card.summary || '').slice(0, 300)}`,
     });
   }
 
-  return signals;
+  // Apply perception lifecycle: filter dormant/dismissed/snoozed, update state
+  const filtered = [];
+  for (const sig of signals) {
+    try {
+      const signalId = _computeSignalId(sig);
+      sig.signal_id = signalId;
+      if (!indexer?.shouldShowPerception) {
+        filtered.push(sig);
+        continue;
+      }
+      if (!indexer.shouldShowPerception(signalId)) continue;
+      indexer.touchPerceptionState({
+        signal_id: signalId,
+        signal_type: sig.type,
+        source_card_id: sig.card_id || null,
+        title: sig.title || '',
+      });
+      filtered.push(sig);
+    } catch { /* non-fatal */ }
+  }
+
+  return filtered;
+}
+
+/** Compute stable signal_id for init perception (same algorithm as daemon.mjs) */
+function _computeSignalId(sig) {
+  const parts = [sig.type];
+  if (sig.card_id) parts.push(sig.card_id);
+  else if (sig.tag) parts.push(`tag:${sig.tag}`);
+  else if (sig.title) parts.push(`title:${sig.title.slice(0, 60)}`);
+  else parts.push(sig.message?.slice(0, 60) || '');
+  const key = parts.join('|');
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  }
+  return `sig_${sig.type}_${Math.abs(hash).toString(36)}`;
 }
 
 export async function buildRecallResult({ search, args, mode = 'local' }) {

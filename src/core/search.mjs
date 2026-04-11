@@ -15,6 +15,7 @@ import { embed, cosineSimilarity } from './embedder.mjs';
 import { detectNeedsCJK } from './lang-detect.mjs';
 import { applyContextBudget } from './context-budgeter.mjs';
 import { planRecallQuery } from './query-planner.mjs';
+import { rerank, getRerankMethod } from './reranker.mjs';
 import { BuiltinRetrievalBackend } from './retrieval-backends/builtin-backend.mjs';
 import { QmdRetrievalBackend, QMD_RESULT_PREFIX } from './retrieval-backends/qmd-backend.mjs';
 
@@ -27,6 +28,12 @@ const RRF_K = 60;
 
 /** Time decay half-life in days (score halves every 30 days) */
 const DECAY_HALF_LIFE_DAYS = 30;
+
+/** Cold data threshold — aligned with cloud backend (90 days) */
+const COLD_THRESHOLD_DAYS = 90;
+
+/** Cold data penalty multiplier (non-evergreen, >90 days) */
+const COLD_PENALTY_FACTOR = 0.3;
 
 /** Cloud recall timeout in milliseconds */
 const CLOUD_TIMEOUT_MS = 3000;
@@ -195,6 +202,17 @@ export class SearchEngine {
 
     let merged = this.mergeResults(localResults, cloudResults, normalizedParams);
 
+    // F-031 Phase 1: Apply reranker (fusion or LLM) after merge, before post-processing
+    if (getRerankMethod() !== 'none' && merged.length > 1) {
+      try {
+        merged = await rerank(merged, semantic_query || keyword_query, {
+          topK: Math.max(limit * 2, merged.length), // Don't trim yet — CJK boost may add more
+        });
+      } catch (err) {
+        if (process.env.DEBUG) console.warn('[search] rerank failed (non-fatal):', err.message);
+      }
+    }
+
     // CJK cross-language boost: run additional English search if CJK dominant
     if (isCjkDominant && expandedKeyword && expandedKeyword !== keyword_query) {
       try {
@@ -240,7 +258,7 @@ export class SearchEngine {
       type: r.type || r.category || 'memory',
       title: r.title || this._autoTitle(r.fts_content || r.content),
       summary: r.summary || r.fts_content || r.content || '',
-      score: r.mergedScore ?? r.finalScore ?? 0,
+      score: r.finalScore ?? r.rerankScore ?? r.mergedScore ?? 0,
       tokens_est: Math.ceil((r.fts_content?.length || r.content?.length || 0) / 4),
       tags: this._parseTags(r.tags),
       created_at: r.created_at,
@@ -620,7 +638,17 @@ export class SearchEngine {
       const rawRelevance = r.rrfScore ?? r.rank ?? r.score ?? 0;
       const normalizedRelevance = rawRelevance / maxRelevance;
       const typeBoost = TYPE_BOOST[r.type] ?? TYPE_BOOST[r.category] ?? 1.0;
-      const finalScore = normalizedRelevance * 0.7 * typeBoost + timeDecay * 0.3;
+
+      // F-031: Adjusted weights — relevance 0.65 + recency 0.05 (aligned with reranker 5-dim)
+      // card_type and growth_stage handled by reranker; here we keep typeBoost as multiplier
+      let finalScore = normalizedRelevance * 0.65 * typeBoost + timeDecay * 0.05;
+
+      // F-031: Cold data penalty — 90-day non-evergreen cliff (aligned with cloud backend)
+      const growthStage = r.growth_stage || 'seedling';
+      if (ageDays > COLD_THRESHOLD_DAYS && growthStage !== 'evergreen') {
+        finalScore *= COLD_PENALTY_FACTOR;
+      }
+
       return { ...r, finalScore, timeDecay };
     });
 

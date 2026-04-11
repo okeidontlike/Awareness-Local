@@ -33,6 +33,7 @@ export const LOOKUP_TYPE_VALUES = [
   'session_history',
   'timeline',
   'perception',
+  'skills',
 ];
 
 export const KNOWLEDGE_CARD_CATEGORY_VALUES = [
@@ -251,6 +252,17 @@ export function getToolDefinitions() {
         properties: {
           role: { type: 'string', description: 'Agent role to get prompt for' },
         },
+      },
+    },
+    {
+      name: 'awareness_mark_skill_used',
+      description: 'Mark a skill as used — resets decay timer and increments usage counter.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          skill_id: { type: 'string', description: 'The ID of the skill to mark as used' },
+        },
+        required: ['skill_id'],
       },
     },
   ];

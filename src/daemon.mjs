@@ -82,6 +82,76 @@ import { MemoryStore } from './core/memory-store.mjs';
 import { Indexer } from './core/indexer.mjs';
 import { CloudSync } from './core/cloud-sync.mjs';
 import { LocalMcpServer } from './mcp-server.mjs';
+import { runLifecycleChecks, validateTaskQuality, checkTaskDedup } from './core/lifecycle-manager.mjs';
+
+// ---------------------------------------------------------------------------
+// F-034: Crystallization local helper
+// ---------------------------------------------------------------------------
+
+/** Eligible categories for F-034 crystallization detection */
+const _CRYST_CATEGORIES = new Set(['workflow', 'decision', 'problem_solution']);
+
+/** Minimum similar pre-existing cards required to trigger a hint */
+const _CRYST_MIN_SIMILAR = 2;
+
+/** Maximum cards to include in the hint */
+const _CRYST_MAX_CARDS = 5;
+
+/**
+ * Check if a newly created card triggers a crystallization hint.
+ * Uses SQLite FTS5 trigram search on knowledge_fts.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ id: string, title: string, summary: string, category: string }} newCard
+ * @returns {{ topic: string, similar_cards: Array, categories: string[] } | null}
+ */
+function _checkCrystallizationLocal(db, newCard) {
+  try {
+    if (!_CRYST_CATEGORIES.has(newCard.category)) return null;
+
+    // Build query terms from title + summary (first 120 chars)
+    const queryText = `${newCard.title} ${(newCard.summary || '').slice(0, 120)}`.trim();
+    if (queryText.length < 5) return null;
+
+    // FTS5 trigram search — exclude the card itself, restrict to eligible categories
+    const cats = [..._CRYST_CATEGORIES].map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT kc.id, kc.title, kc.summary, kc.category
+      FROM knowledge_cards kc
+      JOIN knowledge_fts fts ON fts.id = kc.id
+      WHERE knowledge_fts MATCH ?
+        AND kc.id != ?
+        AND kc.category IN (${cats})
+        AND kc.status NOT IN ('superseded', 'archived')
+      LIMIT ?
+    `).all(queryText, newCard.id, ...[..._CRYST_CATEGORIES], _CRYST_MAX_CARDS + 5);
+
+    if (rows.length < _CRYST_MIN_SIMILAR) return null;
+
+    // Check if a skill already exists covering this topic
+    const existingSkill = db.prepare(
+      `SELECT id FROM skills WHERE lower(name) LIKE ? AND status != 'archived' LIMIT 1`
+    ).get(`%${newCard.title.slice(0, 20).toLowerCase()}%`);
+    if (existingSkill) return null;
+
+    const similarCards = rows.slice(0, _CRYST_MAX_CARDS).map(r => ({
+      id: r.id,
+      title: r.title,
+      summary: (r.summary || '').slice(0, 200),
+    }));
+
+    const categories = [...new Set(rows.map(r => r.category))];
+
+    return {
+      topic: newCard.title,
+      similar_cards: similarCards,
+      categories,
+    };
+  } catch (err) {
+    console.warn('[AwarenessDaemon] Crystallization check failed:', err.message);
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // AwarenessLocalDaemon
@@ -115,6 +185,9 @@ export class AwarenessLocalDaemon {
     // Debounce timer for fs.watch reindex
     this._reindexTimer = null;
     this._reindexDebounceMs = 1000;
+
+    // Skill decay timer (runs every 24h)
+    this._skillDecayTimer = null;
 
     // Track uptime
     this._startedAt = null;
@@ -269,6 +342,9 @@ export class AwarenessLocalDaemon {
     // ---- File watcher ----
     this._startFileWatcher();
 
+    // ---- Skill decay timer (every 24h) ----
+    this._startSkillDecayTimer();
+
     console.log(
       `[awareness-local] daemon running at http://localhost:${this.port}`
     );
@@ -291,6 +367,10 @@ export class AwarenessLocalDaemon {
     if (this._reindexTimer) {
       clearTimeout(this._reindexTimer);
       this._reindexTimer = null;
+    }
+    if (this._skillDecayTimer) {
+      clearInterval(this._skillDecayTimer);
+      this._skillDecayTimer = null;
     }
 
     // Stop cloud sync
@@ -633,8 +713,15 @@ export class AwarenessLocalDaemon {
       });
     }
 
+    // Lifecycle: auto-resolve tasks/risks, garbage collect (fire-and-forget, <30ms)
+    const lifecycle = runLifecycleChecks(this.indexer, params.content, title, params.insights);
+
     // Perception: surface signals the agent didn't ask about (Eywa Whisper)
     const perception = this._buildPerception(params.content, title, memory, params.insights);
+
+    // Fire-and-forget: LLM auto-resolve check on existing active perceptions
+    this._checkPerceptionResolution(id, { title, content: params.content, tags: memory.tags, insights: params.insights })
+      .catch((err) => { if (process.env.DEBUG) console.warn('[awareness-local] perception resolve failed:', err.message); });
 
     const result = {
       status: 'ok',
@@ -645,6 +732,17 @@ export class AwarenessLocalDaemon {
 
     if (perception && perception.length > 0) {
       result.perception = perception;
+    }
+
+    // Surface lifecycle actions in response
+    if (lifecycle.resolved_tasks.length > 0) {
+      result.resolved_tasks = lifecycle.resolved_tasks;
+    }
+    if (lifecycle.mitigated_risks.length > 0) {
+      result.mitigated_risks = lifecycle.mitigated_risks;
+    }
+    if (lifecycle.archived > 0) {
+      result.archived_count = lifecycle.archived;
     }
 
     return result;
@@ -862,7 +960,49 @@ export class AwarenessLocalDaemon {
       }
     }
 
-    return signals.slice(0, 5); // Cap at 5 signals
+    // Apply perception lifecycle: compute signal_id, filter dormant/dismissed/snoozed, update state
+    const filteredSignals = [];
+    for (const sig of signals) {
+      try {
+        const signalId = this._computeSignalId(sig);
+        sig.signal_id = signalId;
+        if (!this.indexer?.shouldShowPerception) {
+          filteredSignals.push(sig);
+          continue;
+        }
+        if (!this.indexer.shouldShowPerception(signalId)) continue;
+        // Touch state (increment exposure_count, apply decay)
+        this.indexer.touchPerceptionState({
+          signal_id: signalId,
+          signal_type: sig.type,
+          source_card_id: sig.card_id || null,
+          title: sig.title || sig.message || '',
+          metadata: { tag: sig.tag, count: sig.count, category: sig.category },
+        });
+        filteredSignals.push(sig);
+      } catch { /* non-fatal */ }
+    }
+
+    return filteredSignals.slice(0, 5); // Cap at 5 signals
+  }
+
+  /**
+   * Compute a stable signal_id based on type + source identifier.
+   * Same signal produced in two different sessions must yield the same ID.
+   */
+  _computeSignalId(sig) {
+    const parts = [sig.type];
+    if (sig.card_id) parts.push(sig.card_id);
+    else if (sig.tag) parts.push(`tag:${sig.tag}`);
+    else if (sig.title) parts.push(`title:${sig.title.slice(0, 60)}`);
+    else parts.push(sig.message?.slice(0, 60) || '');
+    // Simple hash (deterministic)
+    const key = parts.join('|');
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) {
+      hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+    }
+    return `sig_${sig.type}_${Math.abs(hash).toString(36)}`;
   }
 
   /** Return ordinal string (1st, 2nd, 3rd, etc.) */
@@ -940,6 +1080,10 @@ export class AwarenessLocalDaemon {
     let cardsCreated = 0;
     let tasksCreated = 0;
 
+    // F-034: Track newly created eligible cards for crystallization detection
+    const CRYSTALLIZATION_CATEGORIES = new Set(['workflow', 'decision', 'problem_solution']);
+    const crystallizationCandidates = [];
+
     // Process knowledge cards
     if (Array.isArray(insights.knowledge_cards)) {
       for (const card of insights.knowledge_cards) {
@@ -970,7 +1114,7 @@ ${card.summary || card.title || ''}
         fs.mkdirSync(path.dirname(cardFilepath), { recursive: true });
         fs.writeFileSync(cardFilepath, cardContent, 'utf-8');
 
-        this.indexer.indexKnowledgeCard({
+        const cardData = {
           id: cardId,
           category: card.category || 'insight',
           title: card.title || '',
@@ -982,7 +1126,29 @@ ${card.summary || card.title || ''}
           created_at: nowISO(),
           filepath: cardFilepath,
           content: card.summary || card.title || '',
-        });
+        };
+        this.indexer.indexKnowledgeCard(cardData);
+
+        // Incremental MOC: check if this card's tags trigger MOC creation
+        try {
+          const newMocIds = this.indexer.tryAutoMoc(cardData);
+          // Fire-and-forget: refine MOC titles with LLM if available
+          if (newMocIds.length > 0) {
+            this._refineMocTitles(newMocIds).catch(() => {});
+          }
+        } catch (e) {
+          console.warn('[awareness-local] autoMoc error:', e.message);
+        }
+
+        // F-034: Track eligible cards for crystallization hint check
+        if (CRYSTALLIZATION_CATEGORIES.has(card.category)) {
+          crystallizationCandidates.push({
+            id: cardId,
+            title: card.title || '',
+            summary: card.summary || '',
+            category: card.category,
+          });
+        }
 
         cardsCreated++;
       }
@@ -991,6 +1157,20 @@ ${card.summary || card.title || ''}
     // Process action items / tasks
     if (Array.isArray(insights.action_items)) {
       for (const item of insights.action_items) {
+        // Quality gate: reject noise tasks
+        const rejection = validateTaskQuality(item.title);
+        if (rejection) {
+          console.warn(`[AwarenessDaemon] Rejected noise task (${rejection}): ${(item.title || '').substring(0, 60)}`);
+          continue;
+        }
+
+        // Dedup gate: skip if similar open task already exists
+        const { isDuplicate, existingTaskId } = checkTaskDedup(this.indexer, item.title);
+        if (isDuplicate) {
+          console.warn(`[AwarenessDaemon] Skipped duplicate task: "${(item.title || '').substring(0, 60)}" (existing: ${existingTaskId})`);
+          continue;
+        }
+
         const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const taskFilepath = path.join(
           this.awarenessDir, 'tasks', 'open', `${taskId}.md`
@@ -1049,13 +1229,57 @@ ${item.description || item.title || ''}
       }
     }
 
-    return {
+    // F-034: Handle skills submitted via insights.skills[] (crystallization result)
+    let skillsCreated = 0;
+    const submittedSkills = Array.isArray(insights.skills) ? insights.skills : [];
+    if (submittedSkills.length > 0) {
+      for (const skill of submittedSkills) {
+        if (!skill.name) continue;
+        try {
+          const skillId = `skill_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          const now = nowISO();
+          this.indexer.db.prepare(`
+            INSERT OR IGNORE INTO skills
+              (id, name, summary, methods, trigger_conditions, tags, source_card_ids,
+               decay_score, usage_count, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, 0, 'active', ?, ?)
+          `).run(
+            skillId,
+            skill.name,
+            skill.summary || '',
+            skill.methods ? JSON.stringify(skill.methods) : null,
+            skill.trigger_conditions ? JSON.stringify(skill.trigger_conditions) : null,
+            skill.tags ? JSON.stringify(skill.tags) : null,
+            skill.source_card_ids ? JSON.stringify(skill.source_card_ids) : null,
+            now,
+            now,
+          );
+          skillsCreated++;
+        } catch (err) {
+          console.warn(`[AwarenessDaemon] Failed to save skill '${skill.name}':`, err.message);
+        }
+      }
+    }
+
+    // F-034: Crystallization hint — check if newly created eligible cards match existing ones
+    let crystallizationHint = null;
+    if (crystallizationCandidates.length > 0 && submittedSkills.length === 0) {
+      const first = crystallizationCandidates[0];
+      crystallizationHint = _checkCrystallizationLocal(this.indexer.db, first);
+    }
+
+    const result = {
       status: 'ok',
       cards_created: cardsCreated,
       tasks_created: tasksCreated,
       tasks_auto_completed: tasksAutoCompleted,
+      skills_created: skillsCreated,
       mode: 'local',
     };
+    if (crystallizationHint) {
+      result._skill_crystallization_hint = crystallizationHint;
+    }
+    return result;
   }
 
   /** Handle structured data lookups. */
@@ -1177,6 +1401,33 @@ ${item.description || item.title || ''}
           )
           .all(limit);
         return { events: memories, total: memories.length, mode: 'local' };
+      }
+
+      case 'skills': {
+        // F-032: Query dedicated skills table (not deprecated knowledge_cards category)
+        let skillSql = 'SELECT * FROM skills';
+        const skillParams = [];
+
+        if (status) {
+          skillSql += ' WHERE status = ?';
+          skillParams.push(status);
+        } else {
+          skillSql += " WHERE status = 'active'";
+        }
+
+        skillSql += ' ORDER BY decay_score DESC, created_at DESC LIMIT ?';
+        skillParams.push(limit);
+
+        let skills;
+        try {
+          skills = this.indexer.db.prepare(skillSql).all(...skillParams);
+        } catch {
+          // Fallback to legacy knowledge_cards if skills table doesn't exist yet
+          skills = this.indexer.db.prepare(
+            "SELECT * FROM knowledge_cards WHERE category = 'skill' AND status = 'active' ORDER BY created_at DESC LIMIT ?"
+          ).all(limit);
+        }
+        return { skills, total: skills.length, mode: 'local' };
       }
 
       case 'perception': {
@@ -1311,8 +1562,152 @@ ${item.description || item.title || ''}
   }
 
   // -----------------------------------------------------------------------
+  // Skill Decay
+  // -----------------------------------------------------------------------
+
+  /**
+   * Start a 24-hour interval that recalculates skill decay scores.
+   * Also runs once at startup.
+   */
+  _startSkillDecayTimer() {
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    // Run once at startup (deferred so it doesn't block start)
+    setTimeout(() => this._runSkillDecay(), 5000);
+    this._skillDecayTimer = setInterval(
+      () => this._runSkillDecay(),
+      TWENTY_FOUR_HOURS,
+    );
+    // Allow process to exit even if timer is pending
+    if (this._skillDecayTimer.unref) this._skillDecayTimer.unref();
+  }
+
+  /**
+   * Recalculate decay_score for every non-pinned skill.
+   * Formula (aligned with cloud backend):
+   *   baseDecay = exp(-0.693 * daysSince / 30)   // 30-day half-life
+   *   usageBoost = ln(usage_count + 1) / ln(20)
+   *   decay_score = min(1.0, baseDecay + usageBoost)
+   * Pinned skills always keep decay_score = 1.0.
+   */
+  _runSkillDecay() {
+    if (!this.indexer || !this.indexer.db) return;
+    try {
+      const now = Date.now();
+      const skills = this.indexer.db
+        .prepare('SELECT id, last_used_at, usage_count, pinned FROM skills WHERE status = ?')
+        .all('active');
+
+      const update = this.indexer.db.prepare(
+        'UPDATE skills SET decay_score = ?, updated_at = ? WHERE id = ?',
+      );
+
+      const nowISO_ = new Date(now).toISOString();
+      const LN_20 = Math.log(20);
+      const HALF_LIFE_DAYS = 30;
+      const LAMBDA = 0.693 / HALF_LIFE_DAYS; // ln(2) / half-life
+
+      const batch = this.indexer.db.transaction(() => {
+        for (const skill of skills) {
+          if (skill.pinned) {
+            update.run(1.0, nowISO_, skill.id);
+            continue;
+          }
+          const lastUsed = skill.last_used_at
+            ? new Date(skill.last_used_at).getTime()
+            : now;
+          const daysSince = (now - lastUsed) / (1000 * 60 * 60 * 24);
+          const baseDecay = Math.exp(-LAMBDA * daysSince);
+          const usageBoost = Math.log((skill.usage_count || 0) + 1) / LN_20;
+          const score = Math.min(1.0, baseDecay + usageBoost);
+          update.run(Math.round(score * 1000) / 1000, nowISO_, skill.id);
+        }
+      });
+      batch();
+
+      if (skills.length > 0) {
+        console.log(`[awareness-local] skill decay: updated ${skills.length} skills`);
+      }
+    } catch (err) {
+      console.error('[awareness-local] skill decay error:', err.message);
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // Config & spec loading
   // -----------------------------------------------------------------------
+
+  /**
+   * Hot-switch to a different project directory without restarting the daemon.
+   * Closes current indexer/search, re-initializes with new project's .awareness/ data.
+   */
+  async switchProject(newProjectDir) {
+    if (!fs.existsSync(newProjectDir)) {
+      throw new Error(`Project directory does not exist: ${newProjectDir}`);
+    }
+
+    const newAwarenessDir = path.join(newProjectDir, AWARENESS_DIR);
+    console.log(`[awareness-local] switching project: ${this.projectDir} → ${newProjectDir}`);
+
+    // 1. Stop watchers & timers
+    if (this.watcher) { this.watcher.close(); this.watcher = null; }
+    if (this._reindexTimer) { clearTimeout(this._reindexTimer); this._reindexTimer = null; }
+    if (this.cloudSync) { this.cloudSync.stop(); this.cloudSync = null; }
+
+    // 2. Close old indexer
+    if (this.indexer && this.indexer.close) {
+      this.indexer.close();
+    }
+
+    // 3. Update project paths
+    this.projectDir = newProjectDir;
+    this.guardProfile = detectGuardProfile(this.projectDir);
+    this.awarenessDir = newAwarenessDir;
+    this.pidFile = path.join(this.awarenessDir, PID_FILENAME);
+    this.logFile = path.join(this.awarenessDir, LOG_FILENAME);
+
+    // 4. Ensure directory structure
+    fs.mkdirSync(path.join(this.awarenessDir, 'memories'), { recursive: true });
+    fs.mkdirSync(path.join(this.awarenessDir, 'knowledge'), { recursive: true });
+    fs.mkdirSync(path.join(this.awarenessDir, 'tasks'), { recursive: true });
+
+    // 5. Re-init core modules
+    this.memoryStore = new MemoryStore(this.projectDir);
+    try {
+      this.indexer = new Indexer(path.join(this.awarenessDir, 'index.db'));
+    } catch (e) {
+      console.error(`[awareness-local] SQLite indexer unavailable after switch: ${e.message}`);
+      this.indexer = createNoopIndexer();
+    }
+    this.search = await this._loadSearchEngine();
+    this.extractor = await this._loadKnowledgeExtractor();
+
+    // 6. Incremental index
+    try {
+      const result = await this.indexer.incrementalIndex(this.memoryStore);
+      console.log(`[awareness-local] re-indexed: ${result.indexed} files, ${result.skipped} skipped`);
+    } catch (err) {
+      console.error('[awareness-local] re-index error:', err.message);
+    }
+
+    // 7. Restart cloud sync if configured
+    const config = this._loadConfig();
+    if (config.cloud?.enabled) {
+      try {
+        const { CloudSync } = await import('./core/cloud-sync.mjs');
+        this.cloudSync = new CloudSync(config, this.indexer, this.memoryStore);
+        this.cloudSync.start().catch(() => {});
+      } catch { /* CloudSync not available */ }
+    }
+
+    // 8. Update workspace registry
+    try {
+      const { registerWorkspace } = await import('./core/config.mjs');
+      registerWorkspace(newProjectDir, { port: this.port });
+    } catch { /* config.mjs not available */ }
+
+    console.log(`[awareness-local] switched to: ${newProjectDir} (${this.indexer.getStats().totalMemories} memories)`);
+    return { projectDir: newProjectDir, stats: this.indexer.getStats() };
+  }
 
   /** Load .awareness/config.json (or return defaults). */
   _loadConfig() {
@@ -1386,6 +1781,178 @@ ${item.description || item.title || ''}
       indexer: this.indexer,
       loadEmbedder: () => this._loadEmbedder(),
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // LLM-assisted MOC title refinement (fire-and-forget)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Attempt to refine newly created MOC card titles using LLM.
+   * Uses cloud API inference if cloud sync is enabled, otherwise skips silently.
+   */
+  async _refineMocTitles(mocIds) {
+    const config = this._loadConfig();
+    if (!config.cloud?.enabled || !config.cloud?.api_key) return;
+
+    const apiBase = config.cloud.api_base || 'https://awareness.market/api/v1';
+    const memoryId = config.cloud.memory_id;
+    const apiKey = config.cloud.api_key;
+
+    // Simple LLM inference via cloud API's chat endpoint
+    const llmInfer = async (systemPrompt, userContent) => {
+      const { httpJson } = await import('./daemon/cloud-http.mjs');
+      const resp = await httpJson('POST', `${apiBase}/memories/${memoryId}/chat`, {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+        max_tokens: 200,
+      }, { Authorization: `Bearer ${apiKey}` });
+      // The chat endpoint may return different formats
+      if (typeof resp === 'string') return resp;
+      return resp?.content || resp?.choices?.[0]?.message?.content || JSON.stringify(resp);
+    };
+
+    for (const mocId of mocIds) {
+      try {
+        await this.indexer.refineMocWithLlm(mocId, llmInfer);
+      } catch (err) {
+        // Non-fatal — tag-based title remains
+        if (process.env.DEBUG) {
+          console.warn(`[awareness-local] MOC LLM refine failed for ${mocId}: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // LLM-assisted perception auto-resolution
+  // -----------------------------------------------------------------------
+
+  /**
+   * After a new memory is recorded, ask the user's LLM whether any currently
+   * active perception signals have been resolved by this new memory.
+   *
+   * Fire-and-forget. Only runs when:
+   *   - cloud sync is enabled (we use cloud API chat endpoint)
+   *   - there are active perceptions
+   *   - pre-filter finds candidate signals (tag/keyword/source_card match)
+   *
+   * LLM returns a classification per signal: resolved / irrelevant / still_active.
+   * "resolved" signals are auto-dismissed with a resolution_reason.
+   */
+  async _checkPerceptionResolution(newMemoryId, newMemory) {
+    // Rate limit: 1 check per memory per 60s
+    const now = Date.now();
+    if (!this._lastResolveCheckAt) this._lastResolveCheckAt = 0;
+    if (now - this._lastResolveCheckAt < 60000) return;
+    this._lastResolveCheckAt = now;
+
+    // Only if cloud is enabled (we route LLM calls through cloud API)
+    const config = this._loadConfig();
+    if (!config.cloud?.enabled || !config.cloud?.api_key) return;
+
+    // Fetch active perceptions that support auto-resolution
+    if (!this.indexer?.listPerceptionStates) return;
+    const activeStates = this.indexer.listPerceptionStates({
+      state: ['active', 'snoozed'],
+      limit: 50,
+    });
+    const candidates = activeStates.filter((s) =>
+      ['guard', 'contradiction', 'pattern', 'staleness'].includes(s.signal_type)
+    );
+    if (candidates.length === 0) return;
+
+    // Pre-filter: only signals with tag/keyword/source_card overlap with new memory
+    const memTags = new Set((newMemory.tags || []).map((t) => String(t).toLowerCase()));
+    const memText = `${newMemory.title || ''} ${newMemory.content || ''}`.toLowerCase();
+    const newCategory = newMemory.insights?.knowledge_cards?.[0]?.category;
+    const isFixCategory = ['problem_solution', 'decision'].includes(newCategory);
+    if (!isFixCategory && newCategory) return; // Only problem_solution/decision/null can resolve
+
+    const filtered = candidates.filter((sig) => {
+      // Check tag overlap (signal metadata may have tags)
+      let sigTags = [];
+      try { sigTags = JSON.parse(sig.metadata || '{}').tags || []; } catch {}
+      const hasTagOverlap = sigTags.some((t) => memTags.has(String(t).toLowerCase()));
+
+      // Check keyword mention in title
+      const sigWords = (sig.title || '').toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+      const hasKeyword = sigWords.some((w) => memText.includes(w));
+
+      // Check source card reference
+      const sourceMemories = newMemory.insights?.knowledge_cards?.[0]?.source_memories || [];
+      const refsSourceCard = sig.source_card_id && sourceMemories.includes(sig.source_card_id);
+
+      return hasTagOverlap || hasKeyword || refsSourceCard;
+    });
+
+    if (filtered.length === 0) return;
+
+    // Build batch prompt
+    const systemPrompt = `You are analyzing whether a new memory resolves previously-flagged awareness signals.
+
+A "signal" is a warning or insight the system surfaced to the user:
+- GUARD: a known pitfall (e.g., "Electron shell must use --norc")
+- CONTRADICTION: conflicting beliefs in the memory
+- PATTERN: recurring theme suggesting systematic action
+- STALENESS: knowledge that may be outdated
+
+Given each signal + the new memory, classify:
+- "resolved": new memory shows CLEAR evidence the issue was fixed or addressed
+- "irrelevant": new memory is unrelated to this signal
+- "still_active": signal is still relevant (DEFAULT — be conservative)
+
+Rules:
+- Only mark "resolved" when there's explicit evidence (fix, refactor, decision made)
+- Related but not resolved → "still_active"
+- When in doubt → "still_active"
+
+Return JSON only: {"results": [{"signal_id":"...","status":"resolved|irrelevant|still_active","reason":"..."}]}`;
+
+    const userContent = `NEW MEMORY:
+Title: ${newMemory.title || '(no title)'}
+Content: ${(newMemory.content || '').slice(0, 500)}
+Tags: ${[...memTags].join(', ') || '(none)'}
+
+SIGNALS TO CHECK:
+${filtered.map((s) => `[${s.signal_id}] (${s.signal_type}) ${s.title || s.signal_id}`).join('\n')}`;
+
+    try {
+      const { httpJson } = await import('./daemon/cloud-http.mjs');
+      const apiBase = config.cloud.api_base || 'https://awareness.market/api/v1';
+      const memoryId = config.cloud.memory_id;
+      const apiKey = config.cloud.api_key;
+      const resp = await httpJson('POST', `${apiBase}/memories/${memoryId}/chat`, {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+        max_tokens: 500,
+      }, { Authorization: `Bearer ${apiKey}` });
+
+      const raw = typeof resp === 'string' ? resp
+        : resp?.content || resp?.choices?.[0]?.message?.content || '';
+      if (!raw) return;
+
+      // Parse JSON response (robust — grab first JSON object)
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+      const parsed = JSON.parse(jsonMatch[0]);
+      const results = Array.isArray(parsed.results) ? parsed.results : [];
+
+      for (const r of results) {
+        if (r.status === 'resolved' && r.signal_id) {
+          this.indexer.autoResolvePerception(r.signal_id, newMemoryId, r.reason || 'Auto-resolved by LLM');
+          console.log(`[awareness-local] perception auto-resolved: ${r.signal_id} — ${(r.reason || '').slice(0, 80)}`);
+        }
+      }
+    } catch (err) {
+      if (process.env.DEBUG) {
+        console.warn(`[awareness-local] LLM perception resolve failed: ${err.message}`);
+      }
+    }
   }
 
   // -----------------------------------------------------------------------

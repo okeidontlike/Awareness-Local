@@ -16,16 +16,32 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { validateTaskQuality, checkTaskDedup } from './lifecycle-manager.mjs';
 
-// Valid knowledge card categories (matches cloud backend VALID_CATEGORIES).
-// We also accept a small alias set from local/tooling callers for compatibility.
-const VALID_CATEGORIES = new Set([
-  'problem_solution', 'decision', 'workflow', 'key_point', 'pitfall', 'insight',
-  'personal_preference', 'important_detail', 'plan_intention', 'activity_preference',
-  'health_info', 'career_info', 'custom_misc',
-  // Extended aliases accepted from LLMs
-  'risk', 'skill',
-]);
+// Valid knowledge card categories — dynamically loaded from awareness-spec.json
+// with a hardcoded fallback for resilience (matches cloud backend VALID_CATEGORIES).
+function loadValidCategories() {
+  try {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const specPath = path.join(__dirname, '..', '..', 'awareness-spec.json');
+    const spec = JSON.parse(fs.readFileSync(specPath, 'utf-8'));
+    if (spec.categories && Array.isArray(spec.categories)) {
+      const names = new Set(spec.categories.map(c => c.name));
+      names.add('risk'); // backward compat alias
+      return names;
+    }
+  } catch {
+    // Fall through to hardcoded defaults
+  }
+  return new Set([
+    'problem_solution', 'decision', 'workflow', 'key_point', 'pitfall', 'insight',
+    'personal_preference', 'important_detail', 'plan_intention', 'activity_preference',
+    'health_info', 'career_info', 'custom_misc', 'risk', 'skill',
+  ]);
+}
+
+const VALID_CATEGORIES = loadValidCategories();
 
 /**
  * Structural quality gate for knowledge cards submitted by AI agents.
@@ -219,6 +235,16 @@ export class KnowledgeExtractor {
 
     if (insights.action_items) {
       for (const item of insights.action_items) {
+        // Quality gate: reject noise tasks
+        const rejection = validateTaskQuality(item.title);
+        if (rejection) continue;
+
+        // Dedup gate: skip if similar open task exists
+        if (this.indexer) {
+          const { isDuplicate } = checkTaskDedup(this.indexer, item.title);
+          if (isDuplicate) continue;
+        }
+
         tasks.push({
           id: this._generateId('task'),
           title: item.title || '',
