@@ -112,6 +112,7 @@ const BM25_UPDATE_THRESHOLD = -2.0;     // rank > this → similar enough for ev
 // Vector cosine similarity thresholds (same as cloud backend)
 const VECTOR_DUPLICATE_THRESHOLD = 0.95;
 const VECTOR_UPDATE_THRESHOLD = 0.85;
+const VECTOR_MERGE_THRESHOLD = 0.70;    // sim >= this + same category + tags overlap → merge content
 
 // ---------------------------------------------------------------------------
 // Multilingual regex patterns (NOT hardcoded to any single language)
@@ -146,6 +147,21 @@ const TASK_PATTERNS = [
   /^[\s]*[-*]\s*\[\s*\]/m,             // - [ ] unchecked checkbox
   /\b(TODO|FIXME|HACK|待办|要做)\b/i,
 ];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Return true if two tag arrays share at least one tag. Handles JSON strings and plain arrays. */
+function _hasTagOverlap(a, b) {
+  const parse = (v) => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') { try { return JSON.parse(v); } catch { return []; } }
+    return [];
+  };
+  const setA = new Set(parse(a).map((t) => String(t).toLowerCase().trim()).filter(Boolean));
+  return setA.size > 0 && parse(b).some((t) => setA.has(String(t).toLowerCase().trim()));
+}
 
 // ---------------------------------------------------------------------------
 // KnowledgeExtractor
@@ -635,6 +651,17 @@ export class KnowledgeExtractor {
           if (bestSim >= VECTOR_UPDATE_THRESHOLD && bestMatchId) {
             return { verdict: 'update', matchId: bestMatchId };
           }
+          // Same topic, related content — merge into existing card instead of creating new
+          if (bestSim >= VECTOR_MERGE_THRESHOLD && bestMatchId) {
+            const existingCard = recentCards.find((c) => c.id === bestMatchId);
+            if (existingCard) {
+              const sameCategory = (card.category || '') === (existingCard.category || '');
+              const tagsOverlap = _hasTagOverlap(card.tags, existingCard.tags);
+              if (sameCategory && tagsOverlap) {
+                return { verdict: 'merge', matchId: bestMatchId };
+              }
+            }
+          }
         }
       } catch (err) {
         console.warn(`[KnowledgeExtractor] Vector conflict check failed:`, err.message);
@@ -660,6 +687,25 @@ export class KnowledgeExtractor {
       if (conflict.verdict === 'duplicate') {
         console.log(`[KnowledgeExtractor] Skipping duplicate card '${card.title}' (matched: ${conflict.matchId})`);
         continue;
+      }
+      if (conflict.verdict === 'merge' && conflict.matchId) {
+        try {
+          const existing = this.indexer.db
+            .prepare('SELECT id, title, summary FROM knowledge_cards WHERE id = ?')
+            .get(conflict.matchId);
+          if (existing) {
+            const newSummary = existing.summary
+              ? `${existing.summary}\n\n---\n${card.summary}`
+              : card.summary;
+            this.indexer.db
+              .prepare('UPDATE knowledge_cards SET summary = ?, version = version + 1, last_touched_at = ?, synced_to_cloud = 0 WHERE id = ?')
+              .run(newSummary, new Date().toISOString(), existing.id);
+            console.log(`[KnowledgeExtractor] Merged '${card.title}' into '${existing.title}'`);
+            continue;
+          }
+        } catch (err) {
+          console.warn(`[KnowledgeExtractor] Merge failed for '${card.title}', saving as new:`, err.message);
+        }
       }
       if (conflict.verdict === 'update' && conflict.matchId) {
         card.parent_card_id = conflict.matchId;

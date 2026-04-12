@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.20] - 2026-04-12
+
+### Added
+- **Merge-first writing** (`knowledge-extractor.mjs`): New `merge` verdict triggered when vector cosine ≥ 0.70 **and** cards share ≥1 tag **and** same category. Instead of creating a duplicate card, the new content is appended to the existing card's summary (separated by `---`). Prevents topic fragmentation for related notes on the same subject.
+
+### Fixed
+- **`growth_stage` not synced from cloud** (`cloud-sync.mjs`): Pull path now saves the cloud-computed `growth_stage` when updating or inserting cards. Previously all pulled cards stayed `seedling` indefinitely.
+- **Backend sync pull missing `growth_stage`** (`sync_service.py`): `_CARD_COLUMNS` now includes `growth_stage` so `GET /cards/sync` returns the cloud-computed stage.
+
 ## [0.5.19] - 2026-04-12
 
 ### Fixed
