@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.19] - 2026-04-12
+
+### Fixed
+- **Skills cloud sync broken since F-032**: `_syncSkills()` read `cloudSkills.items` but the REST API returns `{skills: [...], total: N}`. The fallback chain iterated object keys instead of the skill array, so skills were never actually pulled from cloud. Fixed to `cloudSkills.items || cloudSkills.skills || (Array.isArray(cloudSkills) ? cloudSkills : [])`. Also applied to the push-check path.
+- Skills insert errors are now logged instead of silently swallowed.
+
 ## [0.5.18] - 2026-04-12
 
 ### Added (F-035 — headless device auth proxy)

@@ -660,7 +660,8 @@ export class CloudSync {
 
       if (pullResp.status === 200) {
         const cloudSkills = JSON.parse(pullResp.body);
-        const items = cloudSkills.items || cloudSkills || [];
+        const items = cloudSkills.items || cloudSkills.skills || (Array.isArray(cloudSkills) ? cloudSkills : []);
+        console.log(`${LOG_PREFIX} Skills pull: got ${items.length} cloud skills`);
 
         for (const cs of items) {
           if (!cs.id || !cs.name) continue;
@@ -695,7 +696,9 @@ export class CloudSync {
                 cs.updated_at || now,
               );
               pulled++;
-            } catch { /* skip duplicates */ }
+            } catch (insertErr) {
+              console.warn(`${LOG_PREFIX} Skills insert failed for "${cs.name}":`, insertErr.message);
+            }
           }
         }
 
@@ -728,7 +731,7 @@ export class CloudSync {
           const checkResp = await httpRequest(checkUrl, { method: 'GET', headers: this._authHeaders() });
           if (checkResp.status === 200) {
             const existing = JSON.parse(checkResp.body);
-            const items = existing.items || existing || [];
+            const items = existing.items || existing.skills || (Array.isArray(existing) ? existing : []);
             if (items.some(s => s.name === ls.name)) {
               // Already exists in cloud, skip push
               continue;
